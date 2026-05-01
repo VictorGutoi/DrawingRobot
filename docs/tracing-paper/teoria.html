@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Pen-Path Tracking on a Differential-Drive Robot</title>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true
+  },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+@page {
+  size: A4;
+  margin: 2cm 2cm 2.2cm 2cm;
+}
+@page :first {
+  margin: 0;
+}
+body {
+  font-family: "Georgia", "Times New Roman", serif;
+  font-size: 10.8pt;
+  line-height: 1.45;
+  color: #1f2328;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  hyphens: auto;
+  text-align: justify;
+}
+.cover {
+  page: cover;
+  text-align: center;
+  padding: 10cm 2cm 0 2cm;
+  page-break-after: always;
+  min-height: 29cm;
+}
+.cover h1.title {
+  font-size: 30pt;
+  color: #0b2a57;
+  border: none;
+  margin: 0 0 0.4em 0;
+  padding: 0;
+  page-break-before: avoid;
+  text-align: center;
+}
+.cover .subtitle {
+  font-size: 16pt;
+  color: #365078;
+  font-style: italic;
+  margin-bottom: 2em;
+}
+.cover .author {
+  font-size: 12pt;
+  color: #555;
+  margin-top: 4em;
+}
+h1, h2, h3, h4 {
+  font-family: "Helvetica Neue", "Arial", sans-serif;
+  color: #0b2a57;
+  page-break-after: avoid;
+  line-height: 1.25;
+}
+h1 {
+  font-size: 22pt;
+  border-bottom: 3px solid #0b2a57;
+  padding-bottom: 0.25em;
+  margin: 1.2em 0 0.8em 0;
+  page-break-before: always;
+}
+h1:first-child { page-break-before: avoid; }
+h2 {
+  font-size: 15pt;
+  margin: 1.4em 0 0.5em 0;
+  border-left: 4px solid #0b2a57;
+  padding-left: 0.4em;
+}
+h3 {
+  font-size: 12.5pt;
+  margin: 1.1em 0 0.3em 0;
+  color: #1a3a6b;
+}
+h4 { font-size: 11pt; color: #1a3a6b; }
+p { margin: 0.5em 0; }
+strong { color: #0b2a57; }
+em { color: #444; }
+code {
+  font-family: "Menlo", "Courier New", monospace;
+  font-size: 9.5pt;
+  background: #f3f5f8;
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+blockquote {
+  border-left: 4px solid #ffb703;
+  margin: 1em 0;
+  padding: 0.2em 0.8em;
+  background: #fff8e3;
+  color: #3b2f00;
+  font-size: 10.4pt;
+  page-break-inside: avoid;
+}
+table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 10pt;
+  page-break-inside: avoid;
+  width: 100%;
+}
+th, td {
+  border: 1px solid #999;
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+th {
+  background: #e8eef5;
+  color: #0b2a57;
+  font-weight: bold;
+}
+ul, ol { margin: 0.4em 0 0.6em 1.2em; padding: 0; }
+li { margin: 0.15em 0; }
+hr {
+  border: none;
+  border-top: 1px solid #aaa;
+  margin: 1em 0;
+}
+.toc {
+  page-break-after: always;
+  padding: 2em 1em;
+}
+.toc h2 {
+  font-size: 22pt;
+  border: none;
+  border-left: 4px solid #0b2a57;
+  margin-top: 0;
+}
+.toc ul {
+  list-style: none;
+  padding-left: 0.6em;
+}
+.toc a { color: #0b2a57; text-decoration: none; }
+a { color: #0b2a57; }
+mjx-container { font-size: 100% !important; }
+mjx-container[jax="CHTML"][display="true"] {
+  margin: 0.4em 0 !important;
+  text-align: center !important;
+}
+</style>
+</head>
+<body>
+<div class="cover">
+  <h1 class="title">Pen-Path Tracking on a Differential-Drive Robot</h1>
+  <div class="subtitle">Feedback linearisation at an off-axis output point — theory, geometry, and the corner problem</div>
+  <div class="author">DrawingRobot project notes</div>
+</div>
+<div class="toc"><span class="toctitle">Índice</span><ul>
+<li><a href="#introduction">Introduction</a></li>
+<li><a href="#tema-1-differential-drive-kinematics">Tema 1 — Differential-drive kinematics</a><ul>
+<li><a href="#11-wheel-commands-and-body-velocities">1.1 Wheel commands and body velocities</a></li>
+<li><a href="#12-pose-evolution">1.2 Pose evolution</a></li>
+<li><a href="#13-the-instantaneous-centre-of-rotation-icr">1.3 The instantaneous centre of rotation (ICR)</a></li>
+<li><a href="#lo-esencial-de-tema-1">Lo esencial de Tema 1</a></li>
+</ul>
+</li>
+<li><a href="#tema-2-the-pen-as-an-output-point">Tema 2 — The pen as an output point</a><ul>
+<li><a href="#21-the-determinant-of-j">2.1 The determinant of $J$</a></li>
+<li><a href="#22-what-the-determinant-tells-us">2.2 What the determinant tells us</a></li>
+<li><a href="#23-the-inverse-jacobian">2.3 The inverse Jacobian</a></li>
+<li><a href="#lo-esencial-de-tema-2">Lo esencial de Tema 2</a></li>
+</ul>
+</li>
+<li><a href="#tema-3-the-single-arc-lower-bound">Tema 3 — The single-arc lower bound</a><ul>
+<li><a href="#31-in-place-rotation">3.1 In-place rotation</a></li>
+<li><a href="#32-general-constant-velocity-command">3.2 General constant-velocity command</a></li>
+<li><a href="#33-what-this-means-in-practice">3.3 What this means in practice</a></li>
+<li><a href="#lo-esencial-de-tema-3">Lo esencial de Tema 3</a></li>
+</ul>
+</li>
+<li><a href="#tema-4-feedback-linearised-tracking">Tema 4 — Feedback-linearised tracking</a><ul>
+<li><a href="#41-reference-path">4.1 Reference path</a></li>
+<li><a href="#42-control-law">4.2 Control law</a></li>
+<li><a href="#43-what-sharp-corners-look-like-inside-this-loop">4.3 What sharp corners look like inside this loop</a></li>
+<li><a href="#44-failure-modes-and-limits">4.4 Failure modes and limits</a></li>
+<li><a href="#lo-esencial-de-tema-4">Lo esencial de Tema 4</a></li>
+</ul>
+</li>
+<li><a href="#tema-5-three-drawing-strategies-side-by-side">Tema 5 — Three drawing strategies, side by side</a><ul>
+<li><a href="#51-when-to-pick-which">5.1 When to pick which</a></li>
+<li><a href="#lo-esencial-de-tema-5">Lo esencial de Tema 5</a></li>
+</ul>
+</li>
+<li><a href="#apendice-final-formulary">Apéndice — Final formulary</a><ul>
+<li><a href="#body-kinematics">Body kinematics</a></li>
+<li><a href="#pen-as-an-output-point">Pen as an output point</a></li>
+<li><a href="#pen-jacobian">Pen Jacobian</a></li>
+<li><a href="#tracking-control-law">Tracking control law</a></li>
+<li><a href="#single-arc-lower-bound">Single-arc lower bound</a></li>
+<li><a href="#default-constants-in-the-codebase">Default constants in the codebase</a></li>
+<li><a href="#si-units-used">SI units used</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<div style="page-break-before: always"></div>
+
+<h1 id="introduction">Introduction</h1>
+<p>The DrawingRobot is a differential-drive chassis with a pen rigidly attached on the chassis outline. The robot draws by moving across a surface; the curve we see on paper is the <strong>pen's trajectory</strong>, not the body's. Because the pen is bolted to the chassis, the pen-tip cannot be moved independently — it is dragged around by whatever the wheels do.</p>
+<p>This creates a tension. Differential drive has only two control inputs $(v_l, v_r)$ but three pose variables $(x, y, \theta)$, and it is <strong>non-holonomic</strong>: the body cannot translate sideways. So if the pen is <em>also</em> on the wheel-axis line, the pen inherits exactly the same constraint and cannot draw a sharp corner — every direction change forces a circular arc of radius at least $|p_\text{body}|$ on the page.</p>
+<p>The good news, and the central result of this note: as soon as the pen sits <strong>off</strong> the wheel-axis line ($p_x \neq 0$ in the body frame), the pen is no longer constrained the way the body is. We can command any 2-D pen velocity we like, in real time, by inverting a $2 \times 2$ Jacobian whose determinant is exactly $p_x$. The pen tracks a polyline — corners and all — within timestep discretisation, while the body weaves underneath to make this happen.</p>
+<p>This document covers:</p>
+<ol>
+<li>The kinematics of the chassis (Tema 1).</li>
+<li>The pen as an output point and its Jacobian (Tema 2).</li>
+<li>The fundamental constraint on single-arc pen radius (Tema 3).</li>
+<li>The feedback-linearisation control law that produces the <code>trace</code> primitive (Tema 4).</li>
+<li>Practical comparison of the three drawing strategies the codebase implements: <code>goto</code>, <code>line_to</code>, <code>trace</code> (Tema 5).</li>
+</ol>
+<p>The reader is expected to have first-year linear algebra (matrix inversion, $2 \times 2$ rotations) and a working idea of differential equations and feedback control. No prior robotics background is assumed.</p>
+<div style="page-break-before: always"></div>
+
+<h1 id="tema-1-differential-drive-kinematics">Tema 1 — Differential-drive kinematics</h1>
+<p>The chassis is a rigid rectangle of width $W$ (between the wheels) and length $L$ (along the heading axis). Two independently driven wheels are mounted directly opposite each other on the two long sides, on a shared <strong>wheel axis</strong>. The midpoint of that axis, $M$, is the natural reference frame origin: the entire body's pose is determined by $M$'s world coordinates $(x, y)$ and the body's heading $\theta$ (measured CCW from world $+x$).</p>
+<p><img alt="Chassis, wheels, body frame, and pen offset $(p_x, p_y)$ measured from the wheel-midpoint $M$." src="figures/01-chassis-frame.png" width="85%" /></p>
+<h2 id="11-wheel-commands-and-body-velocities">1.1 Wheel commands and body velocities</h2>
+<p>Let $v_l$ and $v_r$ be the linear speeds of the left and right wheel contact points. The body's linear speed (along its heading) and angular speed are</p>
+<p>$$\boxed{\;v = \tfrac{1}{2}(v_l + v_r), \quad \omega = \dfrac{v_r - v_l}{W}\;}$$</p>
+<p>These are the standard differential-drive equations. Set $v_l = v_r$ and the body translates straight; set $v_l = -v_r$ and it spins in place about $M$; otherwise it follows a circular arc.</p>
+<p>Units: all quantities are in SI (cm and seconds in the simulator, but the physics is unit-agnostic). Typical numbers for the robot:</p>
+<table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Symbol</th>
+<th>Typical value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Wheelbase</td>
+<td>$W$</td>
+<td>$20.4$ cm</td>
+</tr>
+<tr>
+<td>Chassis length</td>
+<td>$L$</td>
+<td>$23.2$ cm</td>
+</tr>
+<tr>
+<td>Linear speed</td>
+<td>$v$</td>
+<td>$\le 12$ cm/s</td>
+</tr>
+<tr>
+<td>Angular speed</td>
+<td>$\omega$</td>
+<td>$\le \pi$ rad/s ($180^\circ$/s)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="12-pose-evolution">1.2 Pose evolution</h2>
+<p>In the world frame, the wheel-midpoint moves along its current heading and rotates about its instantaneous centre of rotation (ICR):</p>
+<p>$$\boxed{\;\dot{x} = v\cos\theta, \quad \dot{y} = v\sin\theta, \quad \dot{\theta} = \omega\;}$$</p>
+<p>Notice that $\dot{x}$ and $\dot{y}$ are coupled by $\theta$ — the body cannot have $\dot{x} \neq 0$ in a direction other than $\theta$. That is the <strong>non-holonomic constraint</strong>:</p>
+<p>$$\boxed{\;\dot{x}\,\sin\theta - \dot{y}\,\cos\theta = 0\;}$$</p>
+<p>In words: $M$ moves only along the heading direction, never perpendicular to it. A car cannot slide sideways. Neither can $M$.</p>
+<h2 id="13-the-instantaneous-centre-of-rotation-icr">1.3 The instantaneous centre of rotation (ICR)</h2>
+<p>For any pair $(v_l, v_r)$ with $v_l \neq v_r$, the body traces a circle. The centre of that circle, the ICR, lies on the wheel-axis line, at distance $R$ from $M$ given by</p>
+<p>$$\boxed{\;R = \dfrac{v}{\omega} = \dfrac{W}{2}\,\dfrac{v_l + v_r}{v_r - v_l}\;}$$</p>
+<p>The pen, mounted somewhere on the body, traces a concentric circle of radius $|R - p_x|$ when measured along the body $x$-axis at the level of the pen — but more usefully, of radius $|\text{ICR} - P|$ where $P$ is the pen's world position. This is the picture in Figure 2.</p>
+<p><img alt="A single (constant $v_l, v_r$) command drives the body along a circle about the ICR. The pen, rigidly attached, traces a concentric circle of radius $|\text{ICR}-P|$." src="figures/02-icr-geometry.png" width="85%" /></p>
+<h2 id="lo-esencial-de-tema-1">Lo esencial de Tema 1</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Formula</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Body linear / angular speed</td>
+<td>$v=\tfrac{1}{2}(v_l+v_r),\;\omega=(v_r-v_l)/W$</td>
+</tr>
+<tr>
+<td>Pose ODE</td>
+<td>$\dot{x}=v\cos\theta,\;\dot{y}=v\sin\theta,\;\dot{\theta}=\omega$</td>
+</tr>
+<tr>
+<td>Non-holonomic constraint</td>
+<td>$\dot{x}\sin\theta-\dot{y}\cos\theta=0$</td>
+</tr>
+<tr>
+<td>ICR / arc radius</td>
+<td>$R=v/\omega=(W/2)(v_l+v_r)/(v_r-v_l)$</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Things you cannot forget:</strong></p>
+<ol>
+<li>The pose tracked is the <strong>wheel-midpoint</strong> $M$, <em>not</em> the chassis centre. They only coincide when the wheels are at the chassis midline.</li>
+<li>Two inputs $(v_l, v_r)$, three states $(x, y, \theta)$ — under-actuated. The body cannot slide sideways.</li>
+<li>Any constant-input command paints a circle (or, in the limits $\omega = 0$ or $v = 0$, a line or a point).</li>
+</ol>
+<div style="page-break-before: always"></div>
+
+<h1 id="tema-2-the-pen-as-an-output-point">Tema 2 — The pen as an output point</h1>
+<p>The body is what we control; the pen is what we care about. They are related by a fixed offset in the body frame:</p>
+<p>$$\boxed{\;P = M + R(\theta)\,\begin{pmatrix}p_x\p_y\end{pmatrix},\quad R(\theta)=\begin{pmatrix}\cos\theta &amp; -\sin\theta\ \sin\theta &amp; \cos\theta\end{pmatrix}\;}$$</p>
+<p>So the pen's world coordinates are</p>
+<p>$$P_x = x + p_x \cos\theta - p_y \sin\theta, \qquad P_y = y + p_x \sin\theta + p_y \cos\theta.$$</p>
+<p>The pen's <em>velocity</em> — the quantity we will want to command — is the time derivative of $P$:</p>
+<p>$$\dot P_x = \dot x - (p_x\sin\theta + p_y\cos\theta)\,\dot\theta, \qquad \dot P_y = \dot y + (p_x\cos\theta - p_y\sin\theta)\,\dot\theta.$$</p>
+<p>Substituting the body kinematics ($\dot x = v\cos\theta$, $\dot y = v\sin\theta$, $\dot\theta = \omega$) gives a clean linear map from body inputs to pen velocity:</p>
+<p>$$\boxed{\;\begin{pmatrix}\dot P_x\ \dot P_y\end{pmatrix}
+= \underbrace{\begin{pmatrix}\cos\theta &amp; -(p_x\sin\theta+p_y\cos\theta)\ \sin\theta &amp; \;\;p_x\cos\theta-p_y\sin\theta\end{pmatrix}}_{J(\theta)}\,
+\begin{pmatrix}v\ \omega\end{pmatrix}\;}$$</p>
+<p>$J(\theta)$ is the <strong>pen Jacobian</strong>. It is a $2\times 2$ matrix that depends on heading but not on position. Each column has a clear meaning:</p>
+<ul>
+<li><strong>Column 1</strong> ($v$ contribution): $(\cos\theta,\sin\theta)$ — the body's heading direction. Pure forward translation moves the pen along the heading.</li>
+<li><strong>Column 2</strong> ($\omega$ contribution): rotation by $\omega$ about $M$ moves the pen perpendicular to the line from $M$ to $P$, with magnitude proportional to $|MP|$.</li>
+</ul>
+<p>Figure 3 shows this decomposition geometrically.</p>
+<p><img alt="Pen velocity as the sum of a body-translation contribution (column 1 of $J$, blue) and a rotation contribution about $M$ (column 2 of $J$, yellow). Their vector sum is the resulting $\dot P$ (red)." src="figures/03-jacobian.png" width="85%" /></p>
+<h2 id="21-the-determinant-of-j">2.1 The determinant of $J$</h2>
+<p>Computing the determinant:</p>
+<p>$$\det J(\theta) = \cos\theta\,(p_x\cos\theta - p_y\sin\theta) - \sin\theta\,\bigl(-(p_x\sin\theta + p_y\cos\theta)\bigr)$$</p>
+<p>Expanding,</p>
+<p>$$= p_x\cos^2\theta - p_y\sin\theta\cos\theta + p_x\sin^2\theta + p_y\sin\theta\cos\theta = p_x(\cos^2\theta + \sin^2\theta) = p_x.$$</p>
+<p>That is the central identity:</p>
+<p>$$\boxed{\;\det J(\theta) = p_x\;}$$</p>
+<p>It is independent of $\theta$ and of $p_y$. The determinant equals the <em>body x-coordinate of the pen</em> — the offset along the heading axis.</p>
+<h2 id="22-what-the-determinant-tells-us">2.2 What the determinant tells us</h2>
+<p>A $2\times 2$ matrix is invertible iff its determinant is nonzero. So $J(\theta)$ is invertible <strong>for every $\theta$</strong> if and only if $p_x \neq 0$, i.e. the pen sits off the wheel-axis line. When $J$ is invertible, <em>any</em> commanded pen velocity $\dot P_\text{cmd}$ can be realised by setting</p>
+<p>$$\begin{pmatrix}v\ \omega\end{pmatrix} = J(\theta)^{-1}\,\dot P_\text{cmd}.$$</p>
+<p>This is <strong>feedback linearisation at the offset point</strong>: the input–output map $(v,\omega)\to \dot P$ is invertible, so the pen behaves like a fully actuated 2-D point mass even though the body underneath is non-holonomic.</p>
+<p>When $p_x = 0$, the pen is on the wheel-axis line. $J$ is singular for every $\theta$. The pen inherits the body's non-holonomy: its instantaneous velocity is constrained to the body $\hat y_b$-direction (sideways from the body's heading) and cannot be commanded freely.</p>
+<h2 id="23-the-inverse-jacobian">2.3 The inverse Jacobian</h2>
+<p>For $p_x \neq 0$, the closed form of $J^{-1}$ is convenient to have on hand. Let</p>
+<p>$$a = p_x\sin\theta + p_y\cos\theta, \qquad b = p_x\cos\theta - p_y\sin\theta.$$</p>
+<p>Then</p>
+<p>$$\boxed{\;J^{-1}(\theta) = \dfrac{1}{p_x}\begin{pmatrix} b &amp; a \ -\sin\theta &amp; \cos\theta \end{pmatrix}\;}$$</p>
+<p>so that, given a commanded pen velocity $(\dot P_x, \dot P_y)$,</p>
+<p>$$\boxed{\;v = \dfrac{b\,\dot P_x + a\,\dot P_y}{p_x},\qquad \omega = \dfrac{-\sin\theta\,\dot P_x + \cos\theta\,\dot P_y}{p_x}\;}$$</p>
+<p>These are the formulas the code uses every timestep inside <code>_plan_trace</code>.</p>
+<h2 id="lo-esencial-de-tema-2">Lo esencial de Tema 2</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Formula</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pen world position</td>
+<td>$P = M + R(\theta)(p_x,p_y)^\top$</td>
+</tr>
+<tr>
+<td>Pen Jacobian</td>
+<td>$\dot P = J(\theta)(v,\omega)^\top$</td>
+</tr>
+<tr>
+<td>Determinant</td>
+<td>$\det J = p_x$</td>
+</tr>
+<tr>
+<td>Inverse</td>
+<td>$\omega=(-\sin\theta\,\dot P_x+\cos\theta\,\dot P_y)/p_x$</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Things you cannot forget:</strong></p>
+<ol>
+<li>$\det J = p_x$ — the pen's body-frame $x$-coordinate, independent of $\theta$ and of $p_y$.</li>
+<li>The pen is freely controllable in 2-D iff $p_x \neq 0$. The wheel-axis line is the singular set.</li>
+<li>Singularity-aware: even at $p_x \neq 0$, $\omega$ scales like $1/p_x$. A pen <em>near</em> the axis ($|p_x|$ small) demands very large $\omega$ for moderate $\dot P$.</li>
+</ol>
+<div style="page-break-before: always"></div>
+
+<h1 id="tema-3-the-single-arc-lower-bound">Tema 3 — The single-arc lower bound</h1>
+<p>Before introducing the feedback-linearised tracker (Tema 4), it is worth understanding what a <strong>single, constant</strong> $(v_l, v_r)$ command can and cannot do for the pen. Many simple drawing primitives — <code>arc</code>, <code>circle</code>, the in-place rotation that precedes <code>forward</code> — are exactly that: one constant command for some duration.</p>
+<h2 id="31-in-place-rotation">3.1 In-place rotation</h2>
+<p>Set $v_l = -v_r$. Then $v = 0$, and the body rotates about $M$ at angular speed $\omega = 2v_r/W$. The pen, rigidly mounted at body offset $(p_x, p_y)$, traces a circle about $M$ of radius</p>
+<p>$$\boxed{\;r_\text{spin} = \sqrt{p_x^2 + p_y^2} = |p_\text{body}|\;}$$</p>
+<p>For the simulator's default front-mid pen $(p_x, p_y) = (14.4, 0)$, the in-place spin paints a circle of radius $14.4$ cm centred on $M$. This is the <strong>most "concentrated" corner</strong> the robot can paint with one command.</p>
+<h2 id="32-general-constant-velocity-command">3.2 General constant-velocity command</h2>
+<p>For any $(v, \omega)$ with $\omega \neq 0$, the body's ICR is at distance $R = v/\omega$ from $M$ along the wheel-axis, and the pen circles the ICR at radius</p>
+<p>$$r_\text{pen} = |\text{ICR} - P|.$$</p>
+<p>Minimising over choice of $R$ (the only free parameter once the pen offset is fixed): the closest the ICR can ever come to $P$ is by choosing $R = p_y$ (placing the ICR exactly under $P$ on the wheel-axis), giving $r_\text{pen} = |p_x|$. Any other choice gives $r_\text{pen} \geq |p_x|$. So:</p>
+<p>$$\boxed{\;r_\text{pen}\;\ge\;|p_x|\quad\text{for any single constant-input command}\;}$$</p>
+<p>This is a hard kinematic floor. <strong>No single arc command — including in-place rotation, which is just the limit $R = 0$ — can paint a corner of radius smaller than $|p_x|$.</strong></p>
+<h2 id="33-what-this-means-in-practice">3.3 What this means in practice</h2>
+<p>The figure below illustrates: each point on the chassis outline gives a different swept-circle radius when we command in-place rotation. Only the two wheel positions (where $p_x = 0$) produce a zero-radius circle — i.e., a sharp corner.</p>
+<p><img alt="Pen circle swept by in-place rotation. Radius equals $\sqrt{p_x^2+p_y^2}$. The wheel-axis line ($p_x = 0$, blue dashed) is the only locus on the chassis where a single rotation gives a sharp corner, and the only points on the outline that lie on it are the two wheels themselves." src="figures/05-min-radius.png" width="80%" /></p>
+<p>So if you bolt the pen anywhere on the chassis outline <em>except</em> exactly at one of the two wheels, no constant-input command can give you a sharp corner. If you want sharp corners — the <code>square_pen.script</code> and <code>square_lines.script</code> results bear this out — you cannot get them with primitives that emit one wheel command per move.</p>
+<p>The way out is to emit <em>many</em> wheel commands per move and let the inputs vary in time. That is Tema 4.</p>
+<h2 id="lo-esencial-de-tema-3">Lo esencial de Tema 3</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Formula</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>In-place spin radius</td>
+<td>$r_\text{spin}=\sqrt{p_x^2+p_y^2}$</td>
+</tr>
+<tr>
+<td>General arc radius</td>
+<td>$r_\text{pen}=|\text{ICR}-P|\ge|p_x|$</td>
+</tr>
+<tr>
+<td>Sharp-corner locus</td>
+<td>$p_x=0$ (wheel-axis line)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Things you cannot forget:</strong></p>
+<ol>
+<li>Single-arc primitives have a hard lower bound on corner radius equal to $|p_x|$.</li>
+<li>The bound is saturated when the ICR is placed directly under the pen. That is the best a constant command can do.</li>
+<li>To beat the bound, the inputs must vary inside the "corner" — i.e., feedback control.</li>
+</ol>
+<div style="page-break-before: always"></div>
+
+<h1 id="tema-4-feedback-linearised-tracking">Tema 4 — Feedback-linearised tracking</h1>
+<p>We now have all the pieces. Pen velocity is a linear function of body inputs through $J(\theta)$ (Tema 2), and $J$ is invertible whenever $p_x \neq 0$. So we can pick <em>any</em> desired pen velocity, every timestep, and find body inputs that realise it. That is the entire idea of the <code>trace</code> primitive.</p>
+<h2 id="41-reference-path">4.1 Reference path</h2>
+<p>The user's input is a polyline $V_0 \to V_1 \to V_2 \to \cdots \to V_n$ in pen coordinates. The first vertex $V_0$ is the pen's <em>current</em> world position; subsequent vertices are the user-specified targets.</p>
+<p>Each edge $i$ is parameterised by arc length $s \in [0, \ell_i]$, where $\ell_i = |V_{i+1} - V_i|$ and the unit tangent is $\hat t_i = (V_{i+1} - V_i)/\ell_i$. We choose a constant pen speed $v_\text{pen}$ (the script's <code>speed</code> setting) and discretise time at $\Delta t = 1/120\,\text{s}$, giving $\lceil \ell_i / (v_\text{pen}\,\Delta t)\rceil$ steps per edge. At step $k$ along edge $i$:</p>
+<p>$$P_\text{des}(k) = V_i + \min(k\,v_\text{pen}\,\Delta t,\;\ell_i)\,\hat t_i, \qquad \dot P_\text{des} = v_\text{pen}\,\hat t_i.$$</p>
+<h2 id="42-control-law">4.2 Control law</h2>
+<p>A pure feedforward law — set $\dot P_\text{cmd} = \dot P_\text{des}$ each step — would track perfectly only if the pose evolved exactly according to the integrated kinematics. In practice, integration error drifts the pen off the desired path. We add a proportional correction:</p>
+<p>$$\boxed{\;\dot P_\text{cmd} = \dot P_\text{des} + K_p\,(P_\text{des} - P_\text{cur})\;}$$</p>
+<p>with $K_p = 8\,\text{s}^{-1}$ in the codebase. The structure is <strong>feedforward + P-feedback at the output</strong>: the feedforward keeps the pen moving along the edge, the feedback pulls it back if it drifts. Then we invert the Jacobian to get body inputs:</p>
+<p>$$\begin{pmatrix}v\ \omega\end{pmatrix} = J(\theta)^{-1}\,\dot P_\text{cmd},$$</p>
+<p>and finally convert to wheel speeds by the standard differential-drive map:</p>
+<p>$$v_l = v - \omega W/2, \qquad v_r = v + \omega W/2.$$</p>
+<p>That is the loop. Block-diagram form:</p>
+<p><img alt="Per-timestep tracking loop: feedforward $\dot P_\text{des}$, P-feedback on the pen-position error, inverse Jacobian to body $(v,\omega)$, and the differential-drive map to wheels. The pen position $P$ closes the loop." src="figures/06-control-loop.png" width="92%" /></p>
+<h2 id="43-what-sharp-corners-look-like-inside-this-loop">4.3 What sharp corners look like inside this loop</h2>
+<p>At a vertex of the polyline, $\dot P_\text{des}$ flips direction in one timestep — going from $v_\text{pen}\,\hat t_i$ to $v_\text{pen}\,\hat t_{i+1}$. The inverse-Jacobian solve still gives a finite $(v, \omega)$, just briefly with very large $|\omega|$: the body has to spin fast for one or two ticks to swing the pen-tip around. The pen tracks the corner exactly within $O(v_\text{pen}\,\Delta t)$ rounding; the body trajectory underneath is generally not a polyline — it weaves and loops to make the pen-tip do what is asked of it.</p>
+<p><img alt="Pen tracks a sharp corner via feedback linearisation; the body $M$ swings on a smooth curve underneath. Grey segments connect simultaneous body/pen positions at five sample times. Note that the body never visits the corner $(30, 0)$ — it cuts inside while the pen pivots through." src="figures/04-corner-tracking.png" width="90%" /></p>
+<h2 id="44-failure-modes-and-limits">4.4 Failure modes and limits</h2>
+<p>There are three things to be careful about:</p>
+<ol>
+<li><strong>Singularity at $p_x = 0$.</strong> $J^{-1}$ blows up. The codebase rejects <code>trace</code> for pens on the wheel-axis line; use <code>line_to</code> or <code>goto</code> there. (For pens <em>near</em> the axis, $\omega$ stays finite but is large.)</li>
+<li><strong>Actuator saturation.</strong> Sharp corners demand peak $|\omega|$ proportional to $1/p_x$ and to how sharp the angle is. If the wheels saturate, the pen cuts the corner.</li>
+<li><strong>Discretisation ringing.</strong> $K_p\,\Delta t$ acts as a discrete-time feedback gain. If $K_p$ is much larger than $1/\Delta t$ the inner loop oscillates. The default $K_p\,\Delta t = 8/120 \approx 0.067$ is comfortably stable.</li>
+</ol>
+<p>A more robust planner would (a) approach the first vertex with a setup move so the body starts on a feasible trajectory, (b) bound $|\omega|$ to a maximum and round corners only when it would otherwise saturate, and (c) damp the corner sharpness when $|p_x|$ is small. The current implementation does none of these — the corner lemma is purely kinematic, not an optimal-control statement.</p>
+<h2 id="lo-esencial-de-tema-4">Lo esencial de Tema 4</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Formula</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reference along edge $i$</td>
+<td>$P_\text{des} = V_i + s\,\hat t_i$, $\dot P_\text{des} = v_\text{pen}\hat t_i$</td>
+</tr>
+<tr>
+<td>Control law</td>
+<td>$\dot P_\text{cmd} = \dot P_\text{des} + K_p(P_\text{des}-P_\text{cur})$</td>
+</tr>
+<tr>
+<td>Body inputs</td>
+<td>$(v,\omega) = J(\theta)^{-1}\,\dot P_\text{cmd}$</td>
+</tr>
+<tr>
+<td>Wheel speeds</td>
+<td>$v_l = v - \omega W/2,\;v_r = v + \omega W/2$</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Things you cannot forget:</strong></p>
+<ol>
+<li>The trick is having an output point with $p_x \neq 0$. With that, the non-holonomic robot becomes a holonomic 2-D point in pen coordinates.</li>
+<li>The feedforward keeps the pen on track; the P-feedback corrects for integration drift.</li>
+<li>The body trajectory is "free" — whatever the wheels need to be doing to make the pen-tip behave is what they will do.</li>
+</ol>
+<div style="page-break-before: always"></div>
+
+<h1 id="tema-5-three-drawing-strategies-side-by-side">Tema 5 — Three drawing strategies, side by side</h1>
+<p>The codebase implements three pen-aware path commands, each with a different idea about where to put the corner curvature:</p>
+<ul>
+<li><strong><code>goto X Y</code></strong> — pen <em>lands</em> on $(X, Y)$. Plans <code>rotate-then-forward</code>. Each leg is two wheel commands. The rotation sweeps a pen circle of radius $|p_\text{body}|$ centred on $M$ — the corner curve is large and centred <em>between</em> polyline vertices.</li>
+<li><strong><code>line_to X Y</code></strong> — pen <em>draws</em> a straight line from its current world position to $(X, Y)$. Plans <code>rotate-translate-rotate setup</code> + <code>forward</code>. The setup repositions $M$ so the pen sits at the same world point but with the body aligned to the new edge direction. Each polyline edge is then exactly straight on the page; the corner curvature is concentrated at the vertex (the setup translation $|\Delta| = \sqrt{2}\,|p_\text{body}|$ for a $90^\circ$ turn).</li>
+<li><strong><code>trace V_1 V_2 ... V_n</code></strong> — pen tracks the polyline via the feedback linearisation of Tema 4. Each edge is straight; the corners are sharp within timestep discretisation.</li>
+</ul>
+<p>Figure 7 runs the three plans against a $30\,\text{cm}$ square with the same off-axis pen $p_x = 14.4\,\text{cm}$, $p_y = 0$. Body trajectory in blue, pen in red.</p>
+<p><img alt="Pen and body trajectories on a $30\,\text{cm}$ square: goto, line_to, trace. Same chassis, same pen offset $(14.4, 0)$ in body coordinates. The feedforward+feedback trace is the only one that paints a square." src="figures/07-square-comparison.png" width="100%" /></p>
+<p>A few observations:</p>
+<ul>
+<li><strong><code>goto</code> produces a chaotic shape.</strong> The intended polyline is the dashed grey diamond; the actual pen trace cuts across because each leg's setup rotation paints an arc whose curvature is centred <em>between</em> the corners. With $|p_\text{body}| = 14.4$ cm and $30$ cm legs, the arcs dominate the legs.</li>
+<li><strong><code>line_to</code> paints the four edges correctly</strong> (straight line on the page) but the corner setup translates $M$ by $|\Delta| = \sqrt 2 \times 14.4 \approx 20$ cm, and that pen-loop projects outward from each vertex.</li>
+<li><strong><code>trace</code> paints a square.</strong> The pen lands on each vertex (within $\sim 0.2$ cm at the final vertex, dominated by integration drift over the full path); the body $M$ traces a curve inside the square — small circles at each corner where the body has to swing fast for the pen to turn.</li>
+</ul>
+<h2 id="51-when-to-pick-which">5.1 When to pick which</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Pen tracks polyline?</th>
+<th>Corner radius</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>goto</code></td>
+<td>only at vertices</td>
+<td>bulges <em>between</em> legs, radius $\sim</td>
+<td>p_\text{body}</td>
+</tr>
+<tr>
+<td><code>line_to</code></td>
+<td>edges yes, corners no</td>
+<td>localized at vertex, $</td>
+<td>\Delta</td>
+</tr>
+<tr>
+<td><code>trace</code></td>
+<td>yes, including corners</td>
+<td>$\sim v_\text{pen}\Delta t$</td>
+<td>$\sim \ell_i / (v_\text{pen}\Delta t)$ wheel cmds / edge</td>
+</tr>
+</tbody>
+</table>
+<p>For a pen close to the wheel-axis line ($|p_x|$ small), <code>trace</code> will demand large $\omega$ at corners and may saturate. In that regime <code>line_to</code> is more robust at the cost of visible corner arcs. For a pen far from the axis (front-mid mounting in particular, $|p_x|$ comparable to the chassis half-length), <code>trace</code> wins on every metric.</p>
+<p>For a pen <em>exactly</em> on the wheel-axis line ($p_x = 0$), <code>trace</code> is undefined and must not be used. <code>line_to</code> and <code>goto</code> reduce to pure rotate-then-translate plans (no setup translation, since the pen is on the axis), and the body is just driven directly. In that special case the body and pen trace coincide and sharp corners come for free — but everything else suffers, e.g. the pen cannot move sideways at all within an edge, only along the heading.</p>
+<h2 id="lo-esencial-de-tema-5">Lo esencial de Tema 5</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Where the corner curvature goes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>goto</code></td>
+<td>between polyline vertices (large arcs span the leg)</td>
+</tr>
+<tr>
+<td><code>line_to</code></td>
+<td>localised at each vertex (chunky corner, but edges are exact)</td>
+</tr>
+<tr>
+<td><code>trace</code></td>
+<td>nowhere — corner is sharp, body absorbs the curvature</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Things you cannot forget:</strong></p>
+<ol>
+<li>With an off-axis pen, <strong>edges and corners are independent design choices</strong>. <code>line_to</code> makes edges exact but corners chunky; <code>trace</code> makes both edges and corners exact at the cost of more wheel commands per second.</li>
+<li>The corner-radius bound $|p_x|$ is a property of <em>single-arc</em> primitives. <code>trace</code> sidesteps it with per-timestep control.</li>
+<li>The body's path is not the pen's path. Watch the body-trajectory overlay if the pen looks weird — it is often the body (not the pen) running into geometric absurdity.</li>
+</ol>
+<div style="page-break-before: always"></div>
+
+<h1 id="apendice-final-formulary">Apéndice — Final formulary</h1>
+<p>A consolidated reference. Symbols are defined where introduced; this is for quick review.</p>
+<h2 id="body-kinematics">Body kinematics</h2>
+<p>$$v = \tfrac{1}{2}(v_l + v_r),\qquad \omega = \dfrac{v_r - v_l}{W}$$
+$$\dot x = v\cos\theta,\quad \dot y = v\sin\theta,\quad \dot\theta = \omega$$
+$$R = v/\omega = \dfrac{W}{2}\,\dfrac{v_l + v_r}{v_r - v_l}$$
+$$\dot x\sin\theta - \dot y\cos\theta = 0 \quad\text{(non-holonomic constraint)}$$</p>
+<h2 id="pen-as-an-output-point">Pen as an output point</h2>
+<p>$$P = M + R(\theta)\,(p_x, p_y)^\top$$
+$$P_x = x + p_x\cos\theta - p_y\sin\theta,\qquad P_y = y + p_x\sin\theta + p_y\cos\theta$$</p>
+<h2 id="pen-jacobian">Pen Jacobian</h2>
+<p>$$J(\theta) = \begin{pmatrix}\cos\theta &amp; -(p_x\sin\theta+p_y\cos\theta)\ \sin\theta &amp; p_x\cos\theta-p_y\sin\theta\end{pmatrix},\qquad \det J = p_x$$</p>
+<p>$$J^{-1}(\theta) = \dfrac{1}{p_x}\begin{pmatrix}b &amp; a\ -\sin\theta &amp; \cos\theta\end{pmatrix}$$</p>
+<p>with $a = p_x\sin\theta+p_y\cos\theta,\;b = p_x\cos\theta-p_y\sin\theta$.</p>
+<h2 id="tracking-control-law">Tracking control law</h2>
+<p>$$\dot P_\text{cmd} = \dot P_\text{des} + K_p\,(P_\text{des} - P_\text{cur})$$
+$$(v, \omega)^\top = J(\theta)^{-1}\,\dot P_\text{cmd}$$
+$$v_l = v - \omega W/2,\qquad v_r = v + \omega W/2$$</p>
+<h2 id="single-arc-lower-bound">Single-arc lower bound</h2>
+<p>$$r_\text{pen} \ge |p_x| \quad\text{for any single-input command}$$
+$$r_\text{spin} = \sqrt{p_x^2 + p_y^2}\quad\text{(in-place rotation, $v=0$)}$$</p>
+<h2 id="default-constants-in-the-codebase">Default constants in the codebase</h2>
+<table>
+<thead>
+<tr>
+<th>Constant</th>
+<th>Symbol</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Chassis length</td>
+<td>$L$</td>
+<td>$23.2$ cm</td>
+</tr>
+<tr>
+<td>Chassis width / wheelbase</td>
+<td>$W$</td>
+<td>$20.4$ cm</td>
+</tr>
+<tr>
+<td>Wheel offset from back</td>
+<td>$\ell_\text{wo}$</td>
+<td>$8.8$ cm</td>
+</tr>
+<tr>
+<td>Wheel diameter</td>
+<td>$d_w$</td>
+<td>$6.6$ cm</td>
+</tr>
+<tr>
+<td>Linear pen speed</td>
+<td>$v_\text{pen}$</td>
+<td>$12$ cm/s</td>
+</tr>
+<tr>
+<td>Angular speed (rotation primitive)</td>
+<td>$\omega_\text{rot}$</td>
+<td>$\pi$ rad/s</td>
+</tr>
+<tr>
+<td>Tracking timestep</td>
+<td>$\Delta t$</td>
+<td>$1/120$ s</td>
+</tr>
+<tr>
+<td>Tracking P-gain</td>
+<td>$K_p$</td>
+<td>$8$ s$^{-1}$</td>
+</tr>
+</tbody>
+</table>
+<h2 id="si-units-used">SI units used</h2>
+<table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Symbol</th>
+<th>Unit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Length</td>
+<td>$x, y, p_x, p_y$</td>
+<td>m (the simulator uses cm; physics is unit-agnostic)</td>
+</tr>
+<tr>
+<td>Angle</td>
+<td>$\theta$</td>
+<td>rad</td>
+</tr>
+<tr>
+<td>Linear speed</td>
+<td>$v, v_l, v_r$</td>
+<td>m/s</td>
+</tr>
+<tr>
+<td>Angular speed</td>
+<td>$\omega$</td>
+<td>rad/s</td>
+</tr>
+<tr>
+<td>Time</td>
+<td>$t, \Delta t$</td>
+<td>s</td>
+</tr>
+<tr>
+<td>Wheelbase</td>
+<td>$W$</td>
+<td>m</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>
