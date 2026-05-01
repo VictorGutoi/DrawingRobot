@@ -66,16 +66,40 @@ left <deg>              # sugar for turn
 right <deg>             # sugar for turn -
 arc <radius> <deg>      # + angle = left
 circle <radius>         # full CCW circle
+goto <x> <y>            # drive pen to world point (x, y) along a straight
+                        # line; plans rotate+forward, lands pen on target
+line_to <x> <y>         # draw a straight pen line from current pen pos to
+                        # (x, y); plans rotate-translate-rotate setup + forward,
+                        # so each edge of the trace is exactly the polyline edge
+trace x1 y1 x2 y2 ...   # track a polyline pen path via feedback linearisation;
+                        # pen follows polyline exactly within timestep
+                        # discretisation, body weaves underneath; requires px≠0
 speed <cm/s>            # set linear speed (default 12)
 angular_speed <deg/s>   # set rotation speed (default 180)
 # comment
 ```
 
-Defaults reset per script (top of `parse_script`). Each line maps to exactly one `WheelCommand` (no loops/macros — keep grammar trivial).
+Defaults reset per script (top of `parse_script`). Most lines map to one `WheelCommand`; `goto` plans rotate+forward (two commands) and tracks parse-time pose so subsequent gotos build on the previous endpoint.
+
+Two pen-aware path commands:
+
+- **`goto X Y`** — pen *lands* on target. Plans rotate + forward; the rotation arc bulges between targets (centered on the wheel midpoint, not on the polyline corner), so a polyline of gotos visits each corner but the inter-corner pen path is noticeably not the polyline.
+- **`line_to X Y`** — pen *draws* a straight line from its current world position to target. Plans rotate-translate-rotate setup + forward; the setup repositions the wheel midpoint so the pen sits at the same world point but with body aligned to the new edge direction. The forward leg traces the polyline edge exactly. The corner curve (the setup pen path) is localized at the vertex.
+
+Setup translation `Δ = (R_θ_curr − R_θ_new) · pen_body` depends only on the heading change, not on the polyline geometry. For a 90° corner with `|pen_body| = 13.5 cm`, `|Δ| ≈ 19 cm` — the corner is geometrically chunky but stays *at the corner* instead of distorting the edges.
+
+Lower bound on corner radius (for **single-arc** corners): with the pen anywhere on the chassis outline except at one of the two wheel positions, a single arc command paints a pen circle of radius ≥ `|px|` (the body-x component of the pen offset). In-place rotation specifically gives radius `|pen_body|`. Hard kinematic floor for any constant-(v, ω) command.
+
+The `trace` primitive sidesteps that floor by changing (v, ω) every timestep — feedback linearisation at the offset pen point, det J = px. Inverting J each step gives wheel velocities that produce *any* commanded pen velocity, so the pen tracks an arbitrary polyline (sharp corners and all) within timestep discretisation. The body trajectory underneath is generally non-obvious — pen leads, body lags. Singular at px = 0; for pen on the wheel-axis line, use line_to/goto instead.
+
+Folklore consequence of the b=0 singularity in De Luca/Oriolo I/O linearisation; the geometric corner-radius lemma isn't published under a name.
+
+## Movement-layer integration
+
+`CommandRunner.consume(dt)` returns `(v_left, v_right, sub_dt)` segments that split `dt` at command boundaries — call `step()` once per segment so velocities switch exactly when a command ends. Don't integrate with `advance()` + `current_velocities()`; that pattern silently runs leftover `dt` against the previous command, which compounds into visibly wrong angles when the pen is off-axis.
 
 ## Known issues to fix in the movement layer
 
-- **Command-boundary timestep splitting.** `CommandRunner.advance` consumes `dt` past a command boundary by incrementing `_idx`, but the surrounding loop in `sim.run` calls `step()` once with the *current* command's velocities for the *full* `dt`. When a command ends mid-frame, the leftover time integrates the wrong (v_left, v_right). Fix: have `step` (or the runner) split a `dt` that crosses a boundary into per-command sub-steps. The square-script test currently uses a loose tolerance because of this.
 - **Geometry width changed mid-run.** `WheelCommand` velocities are computed from the wheelbase at parse time. If the user moves the Width slider while a turn or arc is executing, the new effective angular velocity is `(v_r - v_l) / width_new` — not what the script asked for. Fix options: (a) re-parse on width change, (b) refactor commands to be wheelbase-independent ("turn 90° at 180 deg/s") and resolve to wheel velocities each step.
 
 ## Things to be careful about

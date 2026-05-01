@@ -79,6 +79,30 @@ class CommandRunner:
             self._elapsed -= self._commands[self._idx].duration
             self._idx += 1
 
+    def consume(self, dt: float) -> list[tuple[float, float, float]]:
+        """Consume `dt` from the command stream as (v_left, v_right, sub_dt) segments.
+
+        Splits dt at command boundaries so each segment runs at the right velocities.
+        Without this, time spilling past a command boundary integrates against the
+        previous command's velocities — small at low dt, but with off-axis pens or
+        strong rotations the residue compounds into visibly wrong angles.
+        """
+        segments: list[tuple[float, float, float]] = []
+        remaining = dt
+        while remaining > 0 and not self.done:
+            cmd = self._commands[self._idx]
+            cmd_remaining = cmd.duration - self._elapsed
+            if remaining < cmd_remaining:
+                segments.append((cmd.v_left, cmd.v_right, remaining))
+                self._elapsed += remaining
+                remaining = 0.0
+            else:
+                segments.append((cmd.v_left, cmd.v_right, cmd_remaining))
+                remaining -= cmd_remaining
+                self._idx += 1
+                self._elapsed = 0.0
+        return segments
+
     def reset(self) -> None:
         self._idx = 0
         self._elapsed = 0.0

@@ -1,0 +1,8 @@
+# Pen-path square: edges are exactly straight on the *pen's* trace.
+# Corners become arcs of radius |pen_body| (the unavoidable fillet for an
+# off-axis pen). Targets are world coordinates of the four corners; place
+# them well outside the pen-to-axle distance so each leg is reachable.
+goto 30 0
+goto 30 30
+goto 0 30
+goto -10 0

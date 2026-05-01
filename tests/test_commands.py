@@ -16,9 +16,8 @@ def integrate(commands, wheelbase: float, dt: float = 0.001) -> Pose:
     pose = Pose(0.0, 0.0, 0.0)
     runner = CommandRunner(commands)
     while not runner.done:
-        v_l, v_r = runner.current_velocities()
-        pose = step(pose, v_l, v_r, wheelbase, dt)
-        runner.advance(dt)
+        for v_l, v_r, sub_dt in runner.consume(dt):
+            pose = step(pose, v_l, v_r, wheelbase, sub_dt)
     return pose
 
 
