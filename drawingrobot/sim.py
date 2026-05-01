@@ -4,6 +4,7 @@ import pygame
 
 from .commands import CommandRunner, WheelCommand
 from .kinematics import Pose, step, transform_point
+from .limits import Limits, NO_LIMITS
 from .robot import RobotGeometry
 from .script import ScriptError, list_scripts, load_script, parse_script
 from . import ui
@@ -154,7 +155,17 @@ def build_runner(source: str, geometry: RobotGeometry,
         return CommandRunner([]), str(e)
 
 
-def run() -> None:
+def run(ros_enabled: bool = False,
+        ros_topic: str = "/cmd_vel",
+        limits: Limits | None = None) -> None:
+    if limits is None:
+        limits = NO_LIMITS
+
+    publisher = None
+    if ros_enabled:
+        from .ros_publisher import RosPublisher
+        publisher = RosPublisher(topic=ros_topic)
+
     pygame.init()
     pygame.display.set_caption("Drawing Robot Simulator")
     screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
@@ -262,11 +273,17 @@ def run() -> None:
         on_submit=on_console_submit,
     )
 
+    last_v = 0.0
+    last_omega = 0.0
+
     while True:
         dt = clock.tick(60) / 1000.0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                if publisher is not None:
+                    publisher.publish(0.0, 0.0, force=True)
+                    publisher.close()
                 pygame.quit()
                 return
             console.handle_event(event)
@@ -298,10 +315,24 @@ def run() -> None:
 
         if state.running and not state.runner.done:
             for v_left, v_right, sub_dt in state.runner.consume(dt):
+                # Integrate the script's intended velocities — preview shows
+                # what was asked for. Limits apply only to the ROS publish, as
+                # a hardware safety net (clamping the integration would mangle
+                # `trace` corners, where peak |ω| spikes far above the ceiling).
                 state.pose = step(state.pose, v_left, v_right, state.geometry.width, sub_dt)
                 state.current_segment().append(transform_point(state.pose, *pen_body))
+                v = 0.5 * (v_left + v_right)
+                omega = (v_right - v_left) / state.geometry.width
+                last_v, last_omega = limits.clamp_vw(v, omega)
         elif state.runner.done and state.running:
             state.running = False
+            last_v, last_omega = 0.0, 0.0
+
+        if not state.running:
+            last_v, last_omega = 0.0, 0.0
+
+        if publisher is not None:
+            publisher.publish(last_v, last_omega)
 
         pen_world = transform_point(state.pose, *pen_body)
 
@@ -335,6 +366,22 @@ def run() -> None:
         ui.draw_text(screen, font,
                      f"Pen swept-arc radius: {corner_r:.1f} cm{axis_msg}",
                      (PANEL_X + PADDING, status_y + 44), ui.COLOR_TEXT_DIM)
+        ui.draw_text(screen, font,
+                     f"Cmd: v={last_v * 0.01:+.3f} m/s  ω={last_omega:+.3f} rad/s",
+                     (PANEL_X + PADDING, status_y + 66), ui.COLOR_TEXT_DIM)
+        if publisher is not None:
+            ros_msg = (f"ROS: {publisher.topic}  pubs={publisher.published_count}  "
+                       f"skip={publisher.skipped_count}  "
+                       f"lim v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
+                       f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
+        elif limits is not NO_LIMITS:
+            ros_msg = (f"ROS: off · limits v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
+                       f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
+        else:
+            ros_msg = "ROS: off · no velocity limits"
+        ros_color = COLOR_OK if publisher is not None else ui.COLOR_TEXT_DIM
+        ui.draw_text(screen, font, ros_msg,
+                     (PANEL_X + PADDING, status_y + 88), ros_color)
 
         ui.draw_divider(screen, PANEL_X + PADDING, 450, INNER_W)
         ui.draw_text(screen, font, "Script:", (PANEL_X + PADDING, 458))

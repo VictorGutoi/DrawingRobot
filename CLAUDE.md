@@ -98,6 +98,48 @@ Folklore consequence of the b=0 singularity in De Luca/Oriolo I/O linearisation;
 
 `CommandRunner.consume(dt)` returns `(v_left, v_right, sub_dt)` segments that split `dt` at command boundaries — call `step()` once per segment so velocities switch exactly when a command ends. Don't integrate with `advance()` + `current_velocities()`; that pattern silently runs leftover `dt` against the previous command, which compounds into visibly wrong angles when the pen is off-axis.
 
+## Velocity limits and ROS2 publishing
+
+`drawingrobot.limits.Limits(max_linear_cm_s, max_angular_rad_s)` enforces ceilings on the body's `(v, ω)`. `clamp_vw(v, ω)` scales **both** by the same ratio when either exceeds its ceiling — instantaneous curvature `R = v/ω` is preserved, the body still follows the same arc, just slower.
+
+**Limits apply only to the ROS publish, not to the simulator integration.** The simulator preview always shows what the script asked for; clamping is a hardware safety net for the real robot consuming `/cmd_vel`. This split matters because the `trace` primitive demands peak `|ω|` proportional to `1/p_x` and to corner sharpness — for a 90° corner with the codebase's defaults that's ~60π rad/s for one tick. Clamping the integration would scale `v` down by the same ratio (curvature-preserving), and the resulting visible trace would have nothing to do with the script. With the new split, the preview is honest about the planner's intent and the published Twist is the truncated version the robot actually executes.
+
+The on-robot consequence: scripts that exceed limits produce a correctly-shaped pen path on the simulator but a distorted one on the real robot — typically rounded corners where the planner asked for sharp ones. Diagnose this by comparing the simulator trace against the actual drawing; if they differ, either lower script speeds (`speed`, `angular_speed`) or raise the CLI ceilings.
+
+`drawingrobot.ros_publisher.RosPublisher(topic, node_name)` publishes `(v, ω)` as `geometry_msgs/Twist` (linear.x = v converted to m/s, angular.z = ω in rad/s). The module imports `rclpy` and `geometry_msgs` lazily inside `__init__` so the rest of the codebase stays usable on machines without ROS2; calling `RosPublisher()` without a ROS2 install raises a `RuntimeError` with a clear message. The publisher is created in `sim.run()` only when `--ros` is passed; teardown on QUIT publishes a final `(0, 0)` Twist before `close()`.
+
+CLI:
+
+```
+python -m drawingrobot                                      # sim only, default limits 0.5 m/s and 0.5 rad/s
+python -m drawingrobot --ros                                # also publish to /cmd_vel
+python -m drawingrobot --ros --ros-topic /robot/cmd_vel
+python -m drawingrobot --max-linear 0.3 --max-angular 1.0   # tighter linear, looser angular
+python -m drawingrobot --headless --script square_trace --ros   # no UI; useful inside a container
+```
+
+Limits are passed in **m/s and rad/s** at the CLI (matching ROS conventions); `Limits` stores them in cm/s and rad/s internally.
+
+### Running with ROS2 against the real robot
+
+The Mac uses RoboStack (`conda env: ros2`, humble distro). The Pi has no native ROS2 — `ros2` on the host is a wrapper that shells out to `docker run ros:humble-ros-base ros2 "$@"`. The combination of those two FastDDS implementations does **not** interop in this network — Cyclone DDS does. So both sides must be set to Cyclone:
+
+```
+# Mac:
+./scripts/run_sim_ros.sh                  # exports RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, ROS_DOMAIN_ID=0
+
+# Pi (from Mac via ssh, or directly on Pi):
+./scripts/run_pi_listener.sh              # echoes /cmd_vel inside a Cyclone-enabled container
+./scripts/run_pi_listener.sh topic info /cmd_vel -v   # diagnostic
+```
+
+Diagnostic gotchas in this stack:
+
+1. **`CYCLONEDDS_URI` interface pin breaks same-host loopback on macOS** — leave it unset on the Mac. The shell scripts above unset it explicitly.
+2. **The `ros2` CLI is a separate conda package from `rclpy`.** RoboStack's `ros-humble-rclpy` ships only the Python bindings. To run `ros2 topic list` from the Mac, also install `ros-humble-ros2cli` and `ros-humble-ros2topic`.
+3. **The micro-ROS agent on the Pi must use the same RMW** (Cyclone) for the ESP32 motor controller to actually receive Twists. The agent runs in its own container; updating only the listener script above is enough to *see* messages with `ros2 topic echo` but does not move the robot until the agent is restarted with `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`.
+4. **`scripts/_ros_smoke_publisher.py`** is a 10 Hz Twist publisher used only for isolating publish-path issues from the simulator GUI. Safe to delete once the integration is stable.
+
 ## Known issues to fix in the movement layer
 
 - **Geometry width changed mid-run.** `WheelCommand` velocities are computed from the wheelbase at parse time. If the user moves the Width slider while a turn or arc is executing, the new effective angular velocity is `(v_r - v_l) / width_new` — not what the script asked for. Fix options: (a) re-parse on width change, (b) refactor commands to be wheelbase-independent ("turn 90° at 180 deg/s") and resolve to wheel velocities each step.
@@ -115,4 +157,4 @@ Folklore consequence of the b=0 singularity in De Luca/Oriolo I/O linearisation;
 - Run tests: `python -m pytest tests/`
 - Run a single test: `python -m pytest tests/test_kinematics.py::test_arc_returns_to_start_after_full_circle`
 
-The kinematics, robot, and commands modules have no pygame dependency — tests run without pygame installed. Only `sim.py` and `ui.py` import pygame.
+The kinematics, robot, and commands modules have no pygame dependency — tests run without pygame installed. Only `sim.py` and `ui.py` import pygame. `ros_publisher.py` imports `rclpy` lazily inside `RosPublisher.__init__`, so the module is importable (and the rest of the package usable) on machines without ROS2 installed.
