@@ -58,7 +58,7 @@ class RosPublisher:
             return
 
         msg = self._Twist()
-        msg.linear.x = float(v_cm_s) * 0.01   # cm/s -> m/s
+        msg.linear.x = float(v_cm_s) * 0.1   # cm/s -> m/s
         msg.angular.z = float(omega_rad_s)
         self._publisher.publish(msg)
         self.published_count += 1

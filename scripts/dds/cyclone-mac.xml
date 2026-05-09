@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cyclone DDS config — Mac side.
+
+  Both Mac (en0/WiFi) and Pi (wlan0/WiFi) live behind a home AP that drops
+  multicast between WiFi clients, so the default Cyclone discovery (multicast)
+  fails silently. This config switches to unicast: the Mac is told exactly
+  where the Pi is, and the Pi has a mirror file pointing back.
+
+  Loaded via CYCLONEDDS_URI=file://.../cyclone-mac.xml in the bring-up scripts.
+
+  If your Pi is on a different IP, edit <Peer address="..."/> below.
+  If your Mac is wired (Ethernet) or on a different interface, edit
+  <NetworkInterface name="..."/> — `ifconfig` shows the active one.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="en0"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer address="192.168.50.53"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

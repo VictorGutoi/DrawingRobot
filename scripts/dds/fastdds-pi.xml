@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS profile — Pi side, for diagnostic listener containers only.
+
+  The Pi's main compose stack (micro-ros-agent, lidar, ...) runs without
+  any DDS XML and works fine. This profile is only for *new* containers
+  spawned ad-hoc on the Pi to inspect the DDS bus from the Pi side, e.g.
+  run_pi_listener.sh's `ros2 topic echo`.
+
+  We pin to wlan0 (192.168.50.53) because the Pi has eth0 on a separate
+  192.168.5.0/24 subnet (the ESP32-P4 Ethernet link); without pinning,
+  FastDDS can pick eth0 and miss the Mac entirely.
+
+  IMPORTANT: <transport_descriptors> must come BEFORE <participant> —
+  FastDDS XML is parsed in document order and a participant referencing
+  an undefined transport_id rejects the whole profile.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udpv4_wlan0</transport_id>
+      <type>UDPv4</type>
+      <interfaceWhiteList>
+        <address>192.168.50.53</address>
+      </interfaceWhiteList>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="default_participant" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <initialPeersList>
+          <locator>
+            <udpv4>
+              <address>192.168.50.40</address>
+            </udpv4>
+          </locator>
+        </initialPeersList>
+      </builtin>
+      <userTransports>
+        <transport_id>udpv4_wlan0</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

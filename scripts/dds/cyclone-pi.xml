@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cyclone DDS config — Pi side. Mirror of cyclone-mac.xml.
+
+  See cyclone-mac.xml header for the why. The Pi has eth0 on a separate
+  192.168.5.0/24 subnet (the ESP32 link), so pinning to wlan0 is required —
+  Cyclone otherwise tends to pick eth0 and never reach the Mac.
+
+  Mounted into the Pi Docker containers at /cyclone.xml and exposed via
+  CYCLONEDDS_URI=file:///cyclone.xml.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="wlan0"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer address="192.168.50.40"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

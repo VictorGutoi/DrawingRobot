@@ -122,23 +122,35 @@ Limits are passed in **m/s and rad/s** at the CLI (matching ROS conventions); `L
 
 ### Running with ROS2 against the real robot
 
-The Mac uses RoboStack (`conda env: ros2`, humble distro). The Pi has no native ROS2 — `ros2` on the host is a wrapper that shells out to `docker run ros:humble-ros-base ros2 "$@"`. The combination of those two FastDDS implementations does **not** interop in this network — Cyclone DDS does. So both sides must be set to Cyclone:
-
 ```
-# Mac:
-./scripts/run_sim_ros.sh                  # exports RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, ROS_DOMAIN_ID=0
-
-# Pi (from Mac via ssh, or directly on Pi):
-./scripts/run_pi_listener.sh              # echoes /cmd_vel inside a Cyclone-enabled container
-./scripts/run_pi_listener.sh topic info /cmd_vel -v   # diagnostic
+./scripts/bringup_mac.sh                          # default: open the GUI sim, /cmd_vel
+./scripts/bringup_mac.sh --script square_trace    # forwards args to drawingrobot
+./scripts/bringup_mac.sh --headless --script line_to
 ```
 
-Diagnostic gotchas in this stack:
+The Pi runs its own docker-compose stack at `~/Documentos/Luloc-ASTI-25-26/02-software/` with `micro-ros-agent` (UDP4 on port 8888, default RMW = FastDDS) plus lidar / telegraf / grafana / influxdb / mosquitto / ptp_master. The agent stays up under `restart: unless-stopped`; the ESP32-P4 reaches it over Ethernet, not USB. **`bringup_mac.sh` does not manage anything on the Pi** — it only configures the Mac and runs the sim. If the compose stack is down, ssh in and `cd ~/Documentos/Luloc-ASTI-25-26/02-software && docker compose up -d`.
 
-1. **`CYCLONEDDS_URI` interface pin breaks same-host loopback on macOS** — leave it unset on the Mac. The shell scripts above unset it explicitly.
-2. **The `ros2` CLI is a separate conda package from `rclpy`.** RoboStack's `ros-humble-rclpy` ships only the Python bindings. To run `ros2 topic list` from the Mac, also install `ros-humble-ros2cli` and `ros-humble-ros2topic`.
-3. **The micro-ROS agent on the Pi must use the same RMW** (Cyclone) for the ESP32 motor controller to actually receive Twists. The agent runs in its own container; updating only the listener script above is enough to *see* messages with `ros2 topic echo` but does not move the robot until the agent is restarted with `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`.
-4. **`scripts/_ros_smoke_publisher.py`** is a 10 Hz Twist publisher used only for isolating publish-path issues from the simulator GUI. Safe to delete once the integration is stable.
+What `bringup_mac.sh` actually does: preflights (`conda env ros2`, `scripts/dds/fastdds-mac.xml` exists, optional ssh probe to `pi5@192.168.50.53` checking that `micro_ros_agent` is up), exports the FastDDS env vars, activates the conda env, and execs `python -m drawingrobot --ros`. Override `PI_HOST=user@host` if your Pi isn't `pi5@192.168.50.53`; set `SKIP_PI_CHECK=1` to skip the ssh probe entirely.
+
+DDS strategy: the Mac speaks FastDDS to match the Pi agent. Multicast discovery actually works on the home network (verified 2026-05-09 by tcpdump on the Pi: Mac multicast announcements reach `wlan0` and the Pi participants reply unicast back to `192.168.50.40:7411`). The Mac's `scripts/dds/fastdds-mac.xml` still pins the transport to `en0` so FastDDS doesn't pick a VPN/utun interface, and includes a unicast `initialPeersList` entry pointing at the Pi as a belt-and-braces fallback for hostile WiFi (corporate AP, hotel). The Pi compose-stack agent needs no XML.
+
+**XML element-order gotcha:** FastDDS parses profiles in document order, so `<transport_descriptors>` must come **before** any `<participant>` that references a custom `<transport_id>`. If a participant references an undefined transport, the parser logs `[XMLPARSER Error] Transport Node not found` and silently rejects the whole profile, falling back to all defaults — which masquerades as "the file isn't being read at all". Both `fastdds-mac.xml` and `fastdds-pi.xml` are ordered correctly; preserve that order on edits.
+
+`scripts/dds/fastdds-pi.xml` is for *diagnostic* containers spawned ad-hoc on the Pi (e.g. `run_pi_listener.sh`). Such a container is its own DDS participant and needs the Mac as an initial peer plus a wlan0 whitelist (the Pi has eth0 on `192.168.5.0/24` for the ESP32-P4 link, so without pinning FastDDS picks the wrong interface). The compose stack does not load this file.
+
+Diagnostic scripts (kept, not deleted):
+
+- `./scripts/run_sim_ros.sh` — Mac sim + ROS publish, no Pi orchestration. Useful to isolate publish-path bugs.
+- `./scripts/run_pi_listener.sh` — `ros2 topic echo /cmd_vel` inside a fresh Pi container with FastDDS + the Mac as unicast peer. Useful to confirm cross-host visibility before the agent is in the loop.
+- `./scripts/_ros_smoke_publisher.py` — 10 Hz Twist publisher, sanity-checks the publish path without the GUI.
+
+`scripts/bringup_pi.sh` and `scripts/dds/cyclone-{mac,pi}.xml` are legacy from a clean-slate flow that brought up its own serial-attached agent on the Pi with Cyclone DDS. They are unused by the current `bringup_mac.sh` but kept until the FastDDS path is fully verified. If you ever need to run on a Pi without the Luloc compose stack, those files document the alternative path.
+
+Stack gotchas:
+
+1. **The `ros2` CLI is a separate conda package from `rclpy`.** RoboStack's `ros-humble-rclpy` ships only the Python bindings. To run `ros2 topic list` from the Mac, also install `ros-humble-ros2cli` and `ros-humble-ros2topic`.
+2. **Mac and Pi must share the same RMW.** The Pi compose stack is FastDDS (image default, no override), so the Mac uses `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` and `FASTRTPS_DEFAULT_PROFILES_FILE=…/fastdds-mac.xml`. FastDDS↔Cyclone interop over RTPS is technically possible but fragile — pick one. Don't leave `CYCLONEDDS_URI` set in the shell when running FastDDS; bring-up scripts `unset` it but a manually-launched session might inherit it.
+3. **`ROS_DOMAIN_ID=0` everywhere.** The Pi compose file leaves `ROS_DOMAIN_ID` unset (default 0). The Mac scripts default to 0. Don't change one without changing the other.
 
 ## Known issues to fix in the movement layer
 

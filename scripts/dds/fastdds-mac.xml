@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  FastDDS profile — Mac side.
+
+  The Pi's docker-compose stack runs micro-ros-agent on the default RMW
+  (FastDDS). The Mac speaks FastDDS to match. The interfaceWhiteList pins
+  outbound traffic to en0 so FastDDS doesn't try to use a VPN tunnel,
+  utun*, or a stale interface.
+
+  initialPeersList is included as a belt-and-braces fallback for networks
+  that drop multicast between WiFi clients. On the user's home network,
+  multicast actually does work; on hostile WiFi (corporate AP, hotel)
+  this is what keeps discovery alive.
+
+  Loaded via FASTRTPS_DEFAULT_PROFILES_FILE in the bring-up scripts.
+
+  IMPORTANT: <transport_descriptors> must come BEFORE <participant> —
+  FastDDS XML is parsed in document order and a participant referencing
+  an undefined transport_id rejects the whole profile silently and falls
+  back to defaults.
+
+  If your Pi is on a different IP, edit <address>192.168.50.53</address>
+  in initialPeersList. If your Mac uses a different interface, edit
+  the interfaceWhiteList <address> — `ifconfig` shows the active one.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udpv4_en0</transport_id>
+      <type>UDPv4</type>
+      <interfaceWhiteList>
+        <address>192.168.50.40</address>
+      </interfaceWhiteList>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="default_participant" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <initialPeersList>
+          <locator>
+            <udpv4>
+              <address>192.168.50.53</address>
+            </udpv4>
+          </locator>
+        </initialPeersList>
+      </builtin>
+      <userTransports>
+        <transport_id>udpv4_en0</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

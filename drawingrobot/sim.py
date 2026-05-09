@@ -37,6 +37,17 @@ COLOR_OK = (140, 200, 140)
 COLOR_WHEEL_AXIS = (180, 100, 200)
 COLOR_CORNER_ARC = (220, 160, 60)
 
+# "Ghost" robot — what the *clamped* (v, ω) actually sent on /cmd_vel will
+# trace on the real robot. Diverges from the main render whenever the script
+# asks for more linear or angular velocity than the limits allow.
+COLOR_GHOST_TRACE = (170, 190, 220)
+COLOR_GHOST_CHASSIS = (160, 160, 170)
+COLOR_GHOST_WHEEL = (130, 130, 140)
+COLOR_GHOST_PEN = (235, 170, 170)
+COLOR_GHOST_HEADING = (170, 200, 170)
+COLOR_GHOST_WHEEL_AXIS = (200, 170, 215)
+COLOR_GHOST_CORNER_ARC = (225, 195, 150)
+
 
 @dataclass
 class SimState:
@@ -44,18 +55,25 @@ class SimState:
     pen_s_normalized: float
     pose: Pose
     runner: CommandRunner
+    ghost_pose: Pose = field(default_factory=lambda: Pose(0.0, 0.0, 0.0))
     program_source: str = ""
     running: bool = False
     trace_segments: list[list[tuple[float, float]]] = field(default_factory=lambda: [[]])
+    ghost_trace_segments: list[list[tuple[float, float]]] = field(default_factory=lambda: [[]])
     last_console_msg: str = ""
     last_console_msg_is_error: bool = False
 
     def current_segment(self) -> list[tuple[float, float]]:
         return self.trace_segments[-1]
 
+    def current_ghost_segment(self) -> list[tuple[float, float]]:
+        return self.ghost_trace_segments[-1]
+
     def break_trace(self) -> None:
         if self.current_segment():
             self.trace_segments.append([])
+        if self.current_ghost_segment():
+            self.ghost_trace_segments.append([])
 
 
 def world_to_screen(x: float, y: float) -> tuple[int, int]:
@@ -77,35 +95,60 @@ def draw_canvas_background(surface: pygame.Surface) -> None:
     pygame.draw.line(surface, COLOR_AXIS, (0, cy), (CANVAS_W, cy))
 
 
-def draw_trace(surface: pygame.Surface, segments: list[list[tuple[float, float]]]) -> None:
+@dataclass(frozen=True)
+class RobotPalette:
+    chassis: tuple[int, int, int]
+    wheel: tuple[int, int, int]
+    wheel_axis: tuple[int, int, int]
+    heading: tuple[int, int, int]
+    pen: tuple[int, int, int]
+    corner_arc: tuple[int, int, int]
+
+
+PALETTE_DEFAULT = RobotPalette(
+    chassis=COLOR_CHASSIS, wheel=COLOR_WHEEL, wheel_axis=COLOR_WHEEL_AXIS,
+    heading=COLOR_HEADING, pen=COLOR_PEN, corner_arc=COLOR_CORNER_ARC,
+)
+PALETTE_GHOST = RobotPalette(
+    chassis=COLOR_GHOST_CHASSIS, wheel=COLOR_GHOST_WHEEL,
+    wheel_axis=COLOR_GHOST_WHEEL_AXIS, heading=COLOR_GHOST_HEADING,
+    pen=COLOR_GHOST_PEN, corner_arc=COLOR_GHOST_CORNER_ARC,
+)
+
+
+def draw_trace(surface: pygame.Surface,
+               segments: list[list[tuple[float, float]]],
+               color: tuple[int, int, int] = COLOR_TRACE,
+               width: int = 2) -> None:
     for seg in segments:
         if len(seg) < 2:
             continue
         pts = [world_to_screen(x, y) for x, y in seg]
-        pygame.draw.lines(surface, COLOR_TRACE, False, pts, 2)
+        pygame.draw.lines(surface, color, False, pts, width)
 
 
 def draw_robot(surface: pygame.Surface, geometry: RobotGeometry, pose: Pose,
-               pen_body: tuple[float, float], pen_world: tuple[float, float]) -> None:
+               pen_body: tuple[float, float], pen_world: tuple[float, float],
+               palette: RobotPalette = PALETTE_DEFAULT) -> None:
     corners = [transform_point(pose, bx, by) for bx, by in geometry.chassis_corners()]
     screen_corners = [world_to_screen(x, y) for x, y in corners]
-    pygame.draw.polygon(surface, COLOR_CHASSIS, screen_corners, 2)
+    pygame.draw.polygon(surface, palette.chassis, screen_corners, 2)
 
     h = geometry.width / 2
     axis_a = transform_point(pose, 0.0, -h)
     axis_b = transform_point(pose, 0.0, h)
-    pygame.draw.line(surface, COLOR_WHEEL_AXIS,
+    pygame.draw.line(surface, palette.wheel_axis,
                      world_to_screen(*axis_a), world_to_screen(*axis_b), 1)
 
     (lb, lf), (rb, rf) = geometry.wheel_endpoints()
     for back_pt, front_pt in ((lb, lf), (rb, rf)):
         wx0, wy0 = transform_point(pose, *back_pt)
         wx1, wy1 = transform_point(pose, *front_pt)
-        pygame.draw.line(surface, COLOR_WHEEL, world_to_screen(wx0, wy0),
+        pygame.draw.line(surface, palette.wheel, world_to_screen(wx0, wy0),
                          world_to_screen(wx1, wy1), 6)
 
     heading_tip = transform_point(pose, geometry.front_x, 0.0)
-    pygame.draw.line(surface, COLOR_HEADING,
+    pygame.draw.line(surface, palette.heading,
                      world_to_screen(pose.x, pose.y),
                      world_to_screen(*heading_tip), 2)
 
@@ -113,10 +156,10 @@ def draw_robot(surface: pygame.Surface, geometry: RobotGeometry, pose: Pose,
     corner_radius_cm = (px * px + py * py) ** 0.5
     if corner_radius_cm > 1e-6:
         radius_px = max(2, int(corner_radius_cm * PIXELS_PER_CM))
-        pygame.draw.circle(surface, COLOR_CORNER_ARC,
+        pygame.draw.circle(surface, palette.corner_arc,
                            world_to_screen(pose.x, pose.y), radius_px, 1)
 
-    pygame.draw.circle(surface, COLOR_PEN, world_to_screen(*pen_world), 5)
+    pygame.draw.circle(surface, palette.pen, world_to_screen(*pen_world), 5)
 
 
 def make_sliders() -> dict[str, ui.Slider]:
@@ -194,7 +237,9 @@ def run(ros_enabled: bool = False,
 
     def reset_pose_and_trace():
         state.pose = Pose(0.0, 0.0, 0.0)
+        state.ghost_pose = Pose(0.0, 0.0, 0.0)
         state.trace_segments = [[]]
+        state.ghost_trace_segments = [[]]
 
     def rebuild_runner():
         state.runner, err = build_runner(
@@ -277,7 +322,7 @@ def run(ros_enabled: bool = False,
     last_omega = 0.0
 
     while True:
-        dt = clock.tick(60) / 1000.0
+        dt = clock.tick(10) / 1000.0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -315,7 +360,7 @@ def run(ros_enabled: bool = False,
 
         if state.running and not state.runner.done:
             for v_left, v_right, sub_dt in state.runner.consume(dt):
-                # Integrate the script's intended velocities — preview shows
+                # Integrate the script's intended velocities — main render shows
                 # what was asked for. Limits apply only to the ROS publish, as
                 # a hardware safety net (clamping the integration would mangle
                 # `trace` corners, where peak |ω| spikes far above the ceiling).
@@ -324,6 +369,18 @@ def run(ros_enabled: bool = False,
                 v = 0.5 * (v_left + v_right)
                 omega = (v_right - v_left) / state.geometry.width
                 last_v, last_omega = limits.clamp_vw(v, omega)
+
+                # Ghost integrates the *clamped* (v, ω) — the values that
+                # actually go on /cmd_vel — so the user can see how the limits
+                # will distort the trace on the real robot.
+                half_w = 0.5 * state.geometry.width
+                v_left_clamped = last_v - last_omega * half_w
+                v_right_clamped = last_v + last_omega * half_w
+                state.ghost_pose = step(state.ghost_pose,
+                                        v_left_clamped, v_right_clamped,
+                                        state.geometry.width, sub_dt)
+                state.current_ghost_segment().append(
+                    transform_point(state.ghost_pose, *pen_body))
         elif state.runner.done and state.running:
             state.running = False
             last_v, last_omega = 0.0, 0.0
@@ -335,10 +392,18 @@ def run(ros_enabled: bool = False,
             publisher.publish(last_v, last_omega)
 
         pen_world = transform_point(state.pose, *pen_body)
+        ghost_pen_world = transform_point(state.ghost_pose, *pen_body)
+        ghost_visible = limits is not NO_LIMITS
 
         screen.fill((20, 22, 26))
         draw_canvas_background(screen)
+        if ghost_visible:
+            draw_trace(screen, state.ghost_trace_segments,
+                       color=COLOR_GHOST_TRACE, width=2)
         draw_trace(screen, state.trace_segments)
+        if ghost_visible:
+            draw_robot(screen, state.geometry, state.ghost_pose,
+                       pen_body, ghost_pen_world, palette=PALETTE_GHOST)
         draw_robot(screen, state.geometry, state.pose, pen_body, pen_world)
 
         ui.draw_panel_background(screen, pygame.Rect(PANEL_X, 0, PANEL_W, WINDOW_H))
