@@ -74,6 +74,10 @@ line_to <x> <y>         # draw a straight pen line from current pen pos to
 trace x1 y1 x2 y2 ...   # track a polyline pen path via feedback linearisation;
                         # pen follows polyline exactly within timestep
                         # discretisation, body weaves underneath; requires px≠0
+r_trace x1 y1 ...       # relative trace: (0, 0) maps to the pen's current
+                        # world position when the command runs. Useful after a
+                        # goto/line_to to draw a shape "starting from here"
+                        # without recomputing absolute coordinates.
 speed <cm/s>            # set linear speed (default 12)
 angular_speed <deg/s>   # set rotation speed (default 180)
 # comment

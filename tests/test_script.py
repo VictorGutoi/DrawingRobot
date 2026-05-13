@@ -279,6 +279,60 @@ def test_trace_requires_off_axis_pen():
     assert "off-axis" in str(exc.value).lower() or "px" in str(exc.value).lower()
 
 
+def test_r_trace_origin_is_current_pen_position():
+    # With pen body offset (14.4, 0) and starting pose (0,0,0), pen starts at
+    # world (14.4, 0). An r_trace ending at (10, 5) should land the pen at
+    # world (24.4, 5), not (10, 5).
+    pen_body = (14.4, 0.0)
+    cmds = parse_script(
+        "r_trace 10 0 10 5", GEOMETRY, pen_body=pen_body,
+        on_warning=lambda _: None,
+    )
+    pose = Pose(0.0, 0.0, 0.0)
+    for cmd in cmds:
+        pose = step(pose, cmd.v_left, cmd.v_right, GEOMETRY.width, cmd.duration)
+    pen_final = transform_point(pose, *pen_body)
+    assert hypot(pen_final[0] - 24.4, pen_final[1] - 5.0) < 0.5
+
+
+def test_r_trace_equivalent_to_trace_after_translation():
+    # An r_trace from a non-origin pen should produce the same plan as a trace
+    # written in absolute coords with the pen's current world position added in.
+    pen_body = (14.4, 0.0)
+    rel_targets = [(10.0, 0.0), (10.0, 5.0), (0.0, 5.0)]
+    abs_targets = [(14.4 + x, 0.0 + y) for x, y in rel_targets]
+
+    rel_script = "r_trace " + " ".join(f"{x} {y}" for x, y in rel_targets)
+    abs_script = "trace " + " ".join(f"{x} {y}" for x, y in abs_targets)
+
+    rel_cmds = parse_script(rel_script, GEOMETRY, pen_body=pen_body,
+                            on_warning=lambda _: None)
+    abs_cmds = parse_script(abs_script, GEOMETRY, pen_body=pen_body,
+                            on_warning=lambda _: None)
+    assert len(rel_cmds) == len(abs_cmds)
+    for r, a in zip(rel_cmds, abs_cmds):
+        assert isclose(r.v_left, a.v_left, abs_tol=1e-9)
+        assert isclose(r.v_right, a.v_right, abs_tol=1e-9)
+        assert isclose(r.duration, a.duration, abs_tol=1e-9)
+
+
+def test_r_trace_after_goto_uses_landed_pen_position_as_origin():
+    # `goto` lands pen at target; subsequent r_trace should originate there.
+    pen_body = (-8.0, 4.0)
+    script_text = (
+        "goto 40 30\n"
+        "r_trace 5 0"
+    )
+    cmds = parse_script(script_text, GEOMETRY, pen_body=pen_body,
+                        on_warning=lambda _: None)
+    pose = Pose(0.0, 0.0, 0.0)
+    for cmd in cmds:
+        pose = step(pose, cmd.v_left, cmd.v_right, GEOMETRY.width, cmd.duration)
+    pen_final = transform_point(pose, *pen_body)
+    # r_trace landed (5, 0) past goto's (40, 30) → expect (45, 30).
+    assert hypot(pen_final[0] - 45.0, pen_final[1] - 30.0) < 0.5
+
+
 def test_trace_respects_angular_limit_at_sharp_corner():
     # 90° corner with a substantially off-axis pen: planner would normally ask
     # for one giant ω spike during the vertex tick. With limits, every emitted

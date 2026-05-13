@@ -60,6 +60,11 @@ def parse_script(
                                   many small WheelCommands; pen follows the
                                   polyline exactly within discretisation.
                                   Requires px ≠ 0 (off-axis pen).
+        r_trace <x1> <y1> ...   - same as `trace`, but interpreted in a frame
+                                  whose origin is the pen's current world
+                                  position. Useful for "draw this shape from
+                                  wherever the pen currently is", e.g. after a
+                                  goto/line_to that positioned the pen.
         speed <cm/s>            - set linear speed for following commands
         angular_speed <deg/s>   - set in-place rotation speed
 
@@ -113,15 +118,24 @@ def parse_script(
                 for plan_cmd in _plan_line_to(
                     (x_t, y_t), pose, pen_body, geometry, speed, angular_speed):
                     _exec(plan_cmd)
-            elif op == "trace":
+            elif op in ("trace", "r_trace"):
                 if len(args) < 2 or len(args) % 2 != 0:
-                    raise ValueError("trace needs at least one (x y) pair, "
+                    raise ValueError(f"{op} needs at least one (x y) pair, "
                                      "given as space-separated numbers")
                 vertices: list[tuple[float, float]] = []
                 for j in range(0, len(args), 2):
                     vx = _arg(args, j, f"x{j // 2}")
                     vy = _arg(args, j + 1, f"y{j // 2}")
                     vertices.append((vx, vy))
+                if op == "r_trace":
+                    # Relative trace: (0, 0) maps to the pen's current world
+                    # position. Resolve at parse time using the running pose +
+                    # pen_body offset, then dispatch to the same planner.
+                    px, py = pen_body
+                    c, s = cos(pose.theta), sin(pose.theta)
+                    pen_x = pose.x + px * c - py * s
+                    pen_y = pose.y + px * s + py * c
+                    vertices = [(pen_x + vx, pen_y + vy) for vx, vy in vertices]
                 for plan_cmd in _plan_trace(
                     vertices, pose, pen_body, geometry, speed, limits):
                     _exec(plan_cmd)
