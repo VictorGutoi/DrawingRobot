@@ -4,4 +4,4 @@
 # Requires off-axis pen (px ≠ 0); fails for pen on the wheel-axis line.
 speed 5
 
-trace 0 0 30 0 30 30 0 30 0 0
+trace -30 0 -20 30 0 10

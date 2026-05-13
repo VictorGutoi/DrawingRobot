@@ -36,6 +36,11 @@ COLOR_ERROR = (220, 110, 110)
 COLOR_OK = (140, 200, 140)
 COLOR_WHEEL_AXIS = (180, 100, 200)
 COLOR_CORNER_ARC = (220, 160, 60)
+COLOR_WHEEL_VECTOR = (230, 130, 50)
+
+# Visual arrow length per (cm/s) of wheel velocity, in world cm. A 12 cm/s
+# wheel velocity gives a 6 cm arrow on the simulated canvas.
+WHEEL_VECTOR_CM_PER_CM_S = 0.5
 
 # "Ghost" robot — what the *clamped* (v, ω) actually sent on /cmd_vel will
 # trace on the real robot. Diverges from the main render whenever the script
@@ -47,6 +52,7 @@ COLOR_GHOST_PEN = (235, 170, 170)
 COLOR_GHOST_HEADING = (170, 200, 170)
 COLOR_GHOST_WHEEL_AXIS = (200, 170, 215)
 COLOR_GHOST_CORNER_ARC = (225, 195, 150)
+COLOR_GHOST_WHEEL_VECTOR = (220, 180, 140)
 
 
 @dataclass
@@ -103,16 +109,19 @@ class RobotPalette:
     heading: tuple[int, int, int]
     pen: tuple[int, int, int]
     corner_arc: tuple[int, int, int]
+    wheel_vector: tuple[int, int, int]
 
 
 PALETTE_DEFAULT = RobotPalette(
     chassis=COLOR_CHASSIS, wheel=COLOR_WHEEL, wheel_axis=COLOR_WHEEL_AXIS,
     heading=COLOR_HEADING, pen=COLOR_PEN, corner_arc=COLOR_CORNER_ARC,
+    wheel_vector=COLOR_WHEEL_VECTOR,
 )
 PALETTE_GHOST = RobotPalette(
     chassis=COLOR_GHOST_CHASSIS, wheel=COLOR_GHOST_WHEEL,
     wheel_axis=COLOR_GHOST_WHEEL_AXIS, heading=COLOR_GHOST_HEADING,
     pen=COLOR_GHOST_PEN, corner_arc=COLOR_GHOST_CORNER_ARC,
+    wheel_vector=COLOR_GHOST_WHEEL_VECTOR,
 )
 
 
@@ -127,9 +136,28 @@ def draw_trace(surface: pygame.Surface,
         pygame.draw.lines(surface, color, False, pts, width)
 
 
+def _draw_arrow(surface: pygame.Surface, tail: tuple[float, float],
+                tip: tuple[float, float], color: tuple[int, int, int],
+                width: int = 2, head_px: float = 7.0) -> None:
+    """Line segment from tail to tip plus a small chevron arrowhead at tip.
+    Coordinates are in screen pixels.
+    """
+    from math import atan2, cos, sin
+    tx, ty = tail
+    hx, hy = tip
+    pygame.draw.line(surface, color, (tx, ty), (hx, hy), width)
+    angle = atan2(hy - ty, hx - tx)
+    spread = 0.5  # ~30° on each side of the shaft
+    for sign in (1, -1):
+        ax = hx - head_px * cos(angle + sign * spread)
+        ay = hy - head_px * sin(angle + sign * spread)
+        pygame.draw.line(surface, color, (hx, hy), (ax, ay), width)
+
+
 def draw_robot(surface: pygame.Surface, geometry: RobotGeometry, pose: Pose,
                pen_body: tuple[float, float], pen_world: tuple[float, float],
-               palette: RobotPalette = PALETTE_DEFAULT) -> None:
+               palette: RobotPalette = PALETTE_DEFAULT,
+               wheel_velocities: tuple[float, float] = (0.0, 0.0)) -> None:
     corners = [transform_point(pose, bx, by) for bx, by in geometry.chassis_corners()]
     screen_corners = [world_to_screen(x, y) for x, y in corners]
     pygame.draw.polygon(surface, palette.chassis, screen_corners, 2)
@@ -146,6 +174,23 @@ def draw_robot(surface: pygame.Surface, geometry: RobotGeometry, pose: Pose,
         wx1, wy1 = transform_point(pose, *front_pt)
         pygame.draw.line(surface, palette.wheel, world_to_screen(wx0, wy0),
                          world_to_screen(wx1, wy1), 6)
+
+    # Per-wheel velocity arrows: anchored at each wheel's center on the axis,
+    # pointing along the body forward axis. Length proportional to |v_wheel|;
+    # sign flips the direction so negative (reverse-spinning) wheels show a
+    # backward arrow.
+    v_left, v_right = wheel_velocities
+    h = geometry.width / 2
+    for body_y, v_wheel in ((h, v_left), (-h, v_right)):
+        if abs(v_wheel) < 1e-6:
+            continue
+        length_cm = v_wheel * WHEEL_VECTOR_CM_PER_CM_S
+        tail_world = transform_point(pose, 0.0, body_y)
+        tip_world = transform_point(pose, length_cm, body_y)
+        _draw_arrow(surface,
+                    world_to_screen(*tail_world),
+                    world_to_screen(*tip_world),
+                    palette.wheel_vector)
 
     heading_tip = transform_point(pose, geometry.front_x, 0.0)
     pygame.draw.line(surface, palette.heading,
@@ -174,6 +219,8 @@ def make_sliders() -> dict[str, ui.Slider]:
                                        0.0, 50.0, REAL_WHEELS_FROM_FRONT_CM, "{:.1f}"),
         "pen_s": ui.Slider(pygame.Rect(x, 260, INNER_W, 6),
                            "Pen position (along outline)", 0.0, 1.0, 0.0, "{:.3f}"),
+        "total_time_s": ui.Slider(pygame.Rect(x, 320, INNER_W, 6),
+                                  "Total run time (s)", 5.0, 120.0, 30.0, "{:.0f}"),
     }
 
 
@@ -189,13 +236,36 @@ def build_geometry(width: float, length: float, wheels_from_front: float) -> Rob
 
 
 def build_runner(source: str, geometry: RobotGeometry,
-                 pen_body: tuple[float, float] = (0.0, 0.0)) -> tuple[CommandRunner, str]:
+                 pen_body: tuple[float, float] = (0.0, 0.0),
+                 limits: Limits = NO_LIMITS,
+                 on_warning=print) -> tuple[CommandRunner, str]:
     """Returns (runner, error_message). On parse error, runner is empty."""
     try:
-        cmds = parse_script(source, geometry, pen_body=pen_body)
+        cmds = parse_script(source, geometry, pen_body=pen_body,
+                            limits=limits, on_warning=on_warning)
         return CommandRunner(cmds), ""
     except ScriptError as e:
         return CommandRunner([]), str(e)
+
+
+def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
+    """Uniformly scale all commands so the runner's total duration = target_time.
+
+    Path geometry is preserved (same wheel-velocity ratios, same per-command
+    distance) — only the timing changes. Velocities × scale, duration / scale.
+    No-op if the runner is empty or target_time is non-positive.
+    """
+    cmds = runner._commands
+    if not cmds or target_time <= 0:
+        return runner
+    total = sum(c.duration for c in cmds)
+    if total <= 0:
+        return runner
+    scale = total / target_time
+    return CommandRunner([
+        WheelCommand(c.v_left * scale, c.v_right * scale, c.duration / scale)
+        for c in cmds
+    ])
 
 
 def run(ros_enabled: bool = False,
@@ -203,6 +273,12 @@ def run(ros_enabled: bool = False,
         limits: Limits | None = None) -> None:
     if limits is None:
         limits = NO_LIMITS
+
+    pending_warnings: list[str] = []
+
+    def record_warning(msg: str) -> None:
+        print(msg, flush=True)
+        pending_warnings.append(msg)
 
     publisher = None
     if ros_enabled:
@@ -220,7 +296,10 @@ def run(ros_enabled: bool = False,
     geometry = build_geometry(REAL_WIDTH_CM, REAL_LENGTH_CM, REAL_WHEELS_FROM_FRONT_CM)
     available_scripts = list_scripts()
     initial_source = load_script("square") if "square" in available_scripts else ""
-    initial_runner, _ = build_runner(initial_source, geometry, geometry.pen_offset(0.0))
+    initial_runner, _ = build_runner(
+        initial_source, geometry, geometry.pen_offset(0.0),
+        limits=limits, on_warning=record_warning)
+    initial_runner = rescale_runner(initial_runner, 30.0)  # match slider default
 
     state = SimState(
         geometry=geometry,
@@ -242,11 +321,17 @@ def run(ros_enabled: bool = False,
         state.ghost_trace_segments = [[]]
 
     def rebuild_runner():
+        pending_warnings.clear()
         state.runner, err = build_runner(
-            state.program_source, state.geometry, current_pen_body())
+            state.program_source, state.geometry, current_pen_body(),
+            limits=limits, on_warning=record_warning)
+        state.runner = rescale_runner(state.runner, sliders["total_time_s"].value)
         if err:
             state.last_console_msg = err
             state.last_console_msg_is_error = True
+        elif pending_warnings:
+            state.last_console_msg = pending_warnings[-1]
+            state.last_console_msg_is_error = False
 
     def on_start():
         if state.runner.done:
@@ -280,9 +365,11 @@ def run(ros_enabled: bool = False,
         state.last_console_msg_is_error = False
 
     def on_console_submit(line: str):
+        pending_warnings.clear()
         try:
             new_cmds: list[WheelCommand] = parse_script(
-                line, state.geometry, pen_body=current_pen_body())
+                line, state.geometry, pen_body=current_pen_body(),
+                limits=limits, on_warning=record_warning)
         except ScriptError as e:
             state.last_console_msg = str(e)
             state.last_console_msg_is_error = True
@@ -297,7 +384,7 @@ def run(ros_enabled: bool = False,
         state.last_console_msg = f"+ {line}"
         state.last_console_msg_is_error = False
 
-    btn_y = 320
+    btn_y = 380
     btn_w = (INNER_W - 16) // 3
     buttons = [
         ui.Button(pygame.Rect(PANEL_X + PADDING, btn_y, btn_w, 36), "Start", on_start),
@@ -320,9 +407,12 @@ def run(ros_enabled: bool = False,
 
     last_v = 0.0
     last_omega = 0.0
+    last_wheel_v = (0.0, 0.0)              # unclamped — main robot's arrows
+    last_wheel_v_clamped = (0.0, 0.0)      # clamped — ghost's arrows
+    prev_total_time = sliders["total_time_s"].value
 
     while True:
-        dt = clock.tick(10) / 1000.0
+        dt = clock.tick(60) / 1000.0
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -356,6 +446,16 @@ def run(ros_enabled: bool = False,
         if new_pen_geom != prev_pen_geom:
             state.break_trace()
 
+        # Total-time slider: any change rebuilds the runner with new scaling
+        # and resets pose/trace. Inline (rather than calling on_reset) to keep
+        # any console message visible while the user drags.
+        new_total_time = sliders["total_time_s"].value
+        if abs(new_total_time - prev_total_time) > 0.01:
+            state.running = False
+            rebuild_runner()
+            reset_pose_and_trace()
+            prev_total_time = new_total_time
+
         pen_body = state.geometry.pen_offset(state.pen_s_normalized * state.geometry.perimeter)
 
         if state.running and not state.runner.done:
@@ -381,12 +481,19 @@ def run(ros_enabled: bool = False,
                                         state.geometry.width, sub_dt)
                 state.current_ghost_segment().append(
                     transform_point(state.ghost_pose, *pen_body))
+
+                last_wheel_v = (v_left, v_right)
+                last_wheel_v_clamped = (v_left_clamped, v_right_clamped)
         elif state.runner.done and state.running:
             state.running = False
             last_v, last_omega = 0.0, 0.0
+            last_wheel_v = (0.0, 0.0)
+            last_wheel_v_clamped = (0.0, 0.0)
 
         if not state.running:
             last_v, last_omega = 0.0, 0.0
+            last_wheel_v = (0.0, 0.0)
+            last_wheel_v_clamped = (0.0, 0.0)
 
         if publisher is not None:
             publisher.publish(last_v, last_omega)
@@ -403,8 +510,10 @@ def run(ros_enabled: bool = False,
         draw_trace(screen, state.trace_segments)
         if ghost_visible:
             draw_robot(screen, state.geometry, state.ghost_pose,
-                       pen_body, ghost_pen_world, palette=PALETTE_GHOST)
-        draw_robot(screen, state.geometry, state.pose, pen_body, pen_world)
+                       pen_body, ghost_pen_world, palette=PALETTE_GHOST,
+                       wheel_velocities=last_wheel_v_clamped)
+        draw_robot(screen, state.geometry, state.pose, pen_body, pen_world,
+                   wheel_velocities=last_wheel_v)
 
         ui.draw_panel_background(screen, pygame.Rect(PANEL_X, 0, PANEL_W, WINDOW_H))
         ui.draw_text(screen, title_font, "Drawing Robot Simulator",
@@ -435,8 +544,8 @@ def run(ros_enabled: bool = False,
                      f"Cmd: v={last_v * 0.01:+.3f} m/s  ω={last_omega:+.3f} rad/s",
                      (PANEL_X + PADDING, status_y + 66), ui.COLOR_TEXT_DIM)
         if publisher is not None:
-            ros_msg = (f"ROS: {publisher.topic}  pubs={publisher.published_count}  "
-                       f"skip={publisher.skipped_count}  "
+            ros_msg = (f"ROS: {ros_topic}  pubs={publisher.published_count}  "
+                       f"idle-skip={publisher.skipped_count}  "
                        f"lim v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
                        f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
         elif limits is not NO_LIMITS:

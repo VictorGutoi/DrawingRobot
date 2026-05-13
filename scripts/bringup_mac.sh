@@ -78,15 +78,19 @@ fi
 # --- Mac DDS env + run sim ----------------------------------------------
 
 say "starting simulator (Ctrl-C to stop)"
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-export FASTRTPS_DEFAULT_PROFILES_FILE="$DDS_XML"
-unset CYCLONEDDS_URI
 
 # conda's activate scripts reference unset vars (CONDA_BUILD etc.); relax -u
 # around the activate, then restore.
 set +u
 conda activate "$CONDA_ENV"
 set -u
+
+# IMPORTANT: export DDS env vars *after* conda activate. RoboStack's
+# activate.d scripts overwrite RMW_IMPLEMENTATION (and friends) with the
+# env's defaults; if we export first, those defaults clobber our values.
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
+export FASTRTPS_DEFAULT_PROFILES_FILE="$DDS_XML"
+unset CYCLONEDDS_URI
 
 exec python -m drawingrobot --ros "$@"

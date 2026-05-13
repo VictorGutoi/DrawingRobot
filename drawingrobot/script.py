@@ -1,8 +1,10 @@
 from math import asin, atan2, cos, hypot, pi, radians, sin, sqrt
 from pathlib import Path
+from typing import Callable
 
 from .commands import WheelCommand, arc, circle, move_straight, rotate_in_place
 from .kinematics import Pose, step
+from .limits import Limits, NO_LIMITS
 from .robot import RobotGeometry
 
 
@@ -10,6 +12,8 @@ DEFAULT_SPEED = 12.0
 DEFAULT_ANGULAR_SPEED_DEG = 180.0
 TRACE_DT = 1.0 / 120.0
 TRACE_KP = 8.0
+DURATION_WARNING_S = 60.0
+TRACE_MAX_STEPS_PER_EDGE = 100_000
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
@@ -25,6 +29,8 @@ def parse_script(
     text: str,
     geometry: RobotGeometry,
     pen_body: tuple[float, float] = (0.0, 0.0),
+    limits: Limits = NO_LIMITS,
+    on_warning: Callable[[str], None] = print,
 ) -> list[WheelCommand]:
     """Parse a script into a flat list of WheelCommands.
 
@@ -67,6 +73,7 @@ def parse_script(
 
     def _exec(cmd: WheelCommand) -> None:
         nonlocal pose
+        cmd = limits.apply_to_command(cmd, geometry.width)
         cmds.append(cmd)
         pose = step(pose, cmd.v_left, cmd.v_right, geometry.width, cmd.duration)
 
@@ -115,7 +122,8 @@ def parse_script(
                     vx = _arg(args, j, f"x{j // 2}")
                     vy = _arg(args, j + 1, f"y{j // 2}")
                     vertices.append((vx, vy))
-                for plan_cmd in _plan_trace(vertices, pose, pen_body, geometry, speed):
+                for plan_cmd in _plan_trace(
+                    vertices, pose, pen_body, geometry, speed, limits):
                     _exec(plan_cmd)
             elif op == "speed":
                 v = _arg(args, 0, "speed")
@@ -131,6 +139,16 @@ def parse_script(
                 raise ValueError(f"unknown command: {op!r}")
         except (IndexError, ValueError) as e:
             raise ScriptError(line_no, str(e)) from e
+
+    total_duration = sum(c.duration for c in cmds)
+    if total_duration > DURATION_WARNING_S:
+        on_warning(
+            f"[parse warning] planned duration {total_duration:.1f}s exceeds "
+            f"{DURATION_WARNING_S:.0f}s — limits "
+            f"(v≤{limits.max_linear_cm_s*0.01:.2f} m/s, "
+            f"ω≤{limits.max_angular_rad_s:.2f} rad/s) may be stretching trace "
+            f"corners; consider raising limits or lowering script speed."
+        )
     return cmds
 
 
@@ -274,6 +292,7 @@ def _plan_trace(
     pen_body: tuple[float, float],
     geometry: RobotGeometry,
     speed: float,
+    limits: Limits = NO_LIMITS,
 ) -> list[WheelCommand]:
     """Track a polyline with the pen via feedback linearisation at the offset point.
 
@@ -282,6 +301,13 @@ def _plan_trace(
     (v, ω) at every timestep that produces *any* commanded pen velocity. The pen
     tracks an arbitrary polyline (sharp corners and all) within timestep
     discretisation; the body weaves underneath to make it work.
+
+    With finite `limits`, each step computes the un-clamped (v, ω) demand,
+    scales both by r = min(1, v_max/|v|, ω_max/|ω|), and advances the path
+    parameter by r·speed·TRACE_DT. The pen still tracks the polyline exactly;
+    body dwells longer near sharp corners so peak |ω| stays legal. With
+    `limits = NO_LIMITS` this reduces to the unclamped controller running at
+    a fixed pen-speed of `speed`.
 
     Reference: De Luca / Oriolo / Vendittelli, *Control of Wheeled Mobile Robots*
     (RAMSETE 2001) — input-output linearisation at an offset output point.
@@ -304,6 +330,7 @@ def _plan_trace(
     waypoints = [(pen_x, pen_y), *vertices]
 
     cur = Pose(pose.x, pose.y, pose.theta)
+    nominal_advance = speed * TRACE_DT
 
     for i in range(len(waypoints) - 1):
         v_start = waypoints[i]
@@ -315,13 +342,15 @@ def _plan_trace(
             continue
         tx = ex / edge_len
         ty = ey / edge_len
-        n_steps = max(1, int(edge_len / (speed * TRACE_DT)) + 1)
 
-        for k in range(n_steps):
-            s_along = min((k + 1) * speed * TRACE_DT, edge_len)
-            ratio = s_along / edge_len
-            pen_des_x = v_start[0] + ex * ratio
-            pen_des_y = v_start[1] + ey * ratio
+        s_along = 0.0
+        step_count = 0
+        while s_along < edge_len - 1e-12 and step_count < TRACE_MAX_STEPS_PER_EDGE:
+            step_count += 1
+            target_s = min(s_along + nominal_advance, edge_len)
+            ratio_along = target_s / edge_len
+            pen_des_x = v_start[0] + ex * ratio_along
+            pen_des_y = v_start[1] + ey * ratio_along
 
             cth, sth = cos(cur.theta), sin(cur.theta)
             pen_cur_x = cur.x + px * cth - py * sth
@@ -335,11 +364,23 @@ def _plan_trace(
             v = (b * v_pen_x + a * v_pen_y) / px
             omega = (-sth * v_pen_x + cth * v_pen_y) / px
 
+            r = limits._ratio(v, omega)
+            v *= r
+            omega *= r
+
             v_l = v - omega * L / 2
             v_r = v + omega * L / 2
 
             cmds.append(WheelCommand(v_l, v_r, TRACE_DT))
             cur = step(cur, v_l, v_r, L, TRACE_DT)
+            s_along = min(s_along + r * nominal_advance, edge_len)
+
+        if step_count >= TRACE_MAX_STEPS_PER_EDGE:
+            raise ValueError(
+                f"trace edge {i} hit max-step guard "
+                f"({TRACE_MAX_STEPS_PER_EDGE}) before completing; limits may be "
+                f"too tight or the path too aggressive."
+            )
 
     return cmds
 

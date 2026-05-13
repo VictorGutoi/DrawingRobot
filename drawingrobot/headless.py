@@ -48,7 +48,7 @@ def run_headless(script_name: str,
     pen_body = geometry.pen_offset(pen_s_normalized * geometry.perimeter)
 
     source = load_script(script_name)
-    cmds = parse_script(source, geometry, pen_body=pen_body)
+    cmds = parse_script(source, geometry, pen_body=pen_body, limits=limits)
     runner = CommandRunner(cmds)
 
     publisher = None

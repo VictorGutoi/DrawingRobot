@@ -4,9 +4,11 @@ import pytest
 
 from drawingrobot.commands import CommandRunner
 from drawingrobot.kinematics import Pose, step, transform_point
+from drawingrobot.limits import Limits, NO_LIMITS
 from drawingrobot.robot import RobotGeometry
 from drawingrobot.script import (
     DEFAULT_SPEED,
+    DURATION_WARNING_S,
     ScriptError,
     list_scripts,
     load_script,
@@ -275,3 +277,87 @@ def test_trace_requires_off_axis_pen():
     with pytest.raises(ScriptError) as exc:
         parse_script("trace 10 10", GEOMETRY, pen_body=(0.0, 5.0))
     assert "off-axis" in str(exc.value).lower() or "px" in str(exc.value).lower()
+
+
+def test_trace_respects_angular_limit_at_sharp_corner():
+    # 90° corner with a substantially off-axis pen: planner would normally ask
+    # for one giant ω spike during the vertex tick. With limits, every emitted
+    # WheelCommand should land under the ceiling.
+    pen_body = (14.4, 0.0)
+    limits = Limits(max_linear_cm_s=50.0, max_angular_rad_s=0.5)
+    cmds = parse_script(
+        "trace 30 0 30 30", GEOMETRY, pen_body=pen_body, limits=limits,
+        on_warning=lambda _msg: None,
+    )
+    for cmd in cmds:
+        v = 0.5 * (cmd.v_left + cmd.v_right)
+        omega = (cmd.v_right - cmd.v_left) / GEOMETRY.width
+        assert abs(v) <= limits.max_linear_cm_s + 1e-9
+        assert abs(omega) <= limits.max_angular_rad_s + 1e-9
+
+
+def test_trace_under_limits_still_tracks_polyline():
+    # Even with tight ω clamp, pen should still visit the final vertex within
+    # tracking discretisation — the body just dwells longer at corners.
+    pen_body = (14.4, 0.0)
+    limits = Limits(max_linear_cm_s=50.0, max_angular_rad_s=0.5)
+    cmds = parse_script(
+        "trace 30 0 30 30 0 30 0 0", GEOMETRY, pen_body=pen_body, limits=limits,
+        on_warning=lambda _msg: None,
+    )
+    pose = Pose(0.0, 0.0, 0.0)
+    for cmd in cmds:
+        pose = step(pose, cmd.v_left, cmd.v_right, GEOMETRY.width, cmd.duration)
+    pen_final = transform_point(pose, *pen_body)
+    # Final waypoint is (0, 0).
+    assert hypot(pen_final[0], pen_final[1]) < 1.0
+
+
+def test_trace_no_limits_matches_legacy_behavior():
+    # With NO_LIMITS the per-step ratio is always 1.0, so the planner advances
+    # the path at full speed (~nominal step count, no corner stretching).
+    pen_body = (14.4, 0.0)
+    cmds = parse_script(
+        "trace 30 0", GEOMETRY, pen_body=pen_body, limits=NO_LIMITS,
+        on_warning=lambda _msg: None,
+    )
+    # Pen starts at body (14.4, 0); one edge to (30, 0), length 15.6 cm.
+    # At speed=12, TRACE_DT=1/120 → ~156 nominal steps.
+    assert 120 < len(cmds) < 200
+
+
+def test_apply_limits_used_by_non_trace_commands():
+    # Aggressive in-place rotation should be clamped at parse time.
+    limits = Limits(max_linear_cm_s=50.0, max_angular_rad_s=0.5)
+    cmds = parse_script(
+        "angular_speed 400\nturn 90",
+        GEOMETRY, limits=limits, on_warning=lambda _msg: None,
+    )
+    assert len(cmds) == 1
+    omega = (cmds[0].v_right - cmds[0].v_left) / GEOMETRY.width
+    assert abs(omega) <= limits.max_angular_rad_s + 1e-9
+    # Final body angle still ≈ 90° (geometry preserved by duration stretch).
+    pose = Pose(0.0, 0.0, 0.0)
+    for cmd in cmds:
+        pose = step(pose, cmd.v_left, cmd.v_right, GEOMETRY.width, cmd.duration)
+    assert isclose(pose.theta, pi / 2, abs_tol=1e-6)
+
+
+def test_duration_warning_fires_for_long_plans():
+    # Forward 10 m at 1 cm/s → 1000 s plan, comfortably above the threshold.
+    seen: list[str] = []
+    parse_script(
+        "speed 1\nforward 1000",
+        GEOMETRY,
+        on_warning=seen.append,
+    )
+    assert seen, "expected at least one parse warning"
+    assert "duration" in seen[-1].lower()
+
+
+def test_no_duration_warning_for_short_plans():
+    seen: list[str] = []
+    parse_script("forward 10", GEOMETRY, on_warning=seen.append)
+    assert seen == []
+    # And the threshold constant is reasonable.
+    assert DURATION_WARNING_S > 0
