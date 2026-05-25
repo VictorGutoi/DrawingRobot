@@ -1,0 +1,11 @@
+{
+  "defaults": { "pen_s": 0.0 },
+  "slots": [
+    { "index": 0, "script": "square_trace",     "label": "Square (trace)" },
+    { "index": 1, "script": "circle",           "label": "Circle" },
+    { "index": 2, "script": "triangle_r_trace", "label": "Triangle (r_trace)" },
+    { "index": 3, "script": "final_square",     "label": "Final square" },
+    { "index": 4, "script": "square10_trace",   "label": "Square 10 (trace)" },
+    { "index": 5, "script": "sqaure10",         "label": "Square 10" }
+  ]
+}

@@ -7,10 +7,11 @@ from .kinematics import Pose, step, transform_point
 from .limits import Limits, NO_LIMITS
 from .robot import RobotGeometry
 from .script import ScriptError, list_scripts, load_script, parse_script
+from .slots_config import SlotsConfigError, default_slots_path, load_slots
 from . import ui
 
 
-WINDOW_W, WINDOW_H = 1200, 800
+WINDOW_W, WINDOW_H = 1200, 960
 CANVAS_W = 800
 PANEL_X = CANVAS_W
 PANEL_W = WINDOW_W - CANVAS_W
@@ -271,7 +272,8 @@ def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
 def run(ros_enabled: bool = False,
         ros_topic: str = "/cmd_vel",
         limits: Limits | None = None,
-        mode_topic: str = "/robot/mode_cmd") -> None:
+        mode_topic: str = "/robot/mode_cmd",
+        slots_path: str | None = None) -> None:
     if limits is None:
         limits = NO_LIMITS
 
@@ -285,13 +287,23 @@ def run(ros_enabled: bool = False,
     mode_publisher = None
     if ros_enabled:
         from .ros_publisher import RosPublisher
-        from .mode_publisher import ModePublisher, MODE_REMOTE_DRIVE
+        from .mode_publisher import ModePublisher, MODE_REMOTE_DRIVE, MODE_STOP
         publisher = RosPublisher(topic=ros_topic)
         mode_publisher = ModePublisher(topic=mode_topic)
     else:
-        # Import the mode constant unconditionally so on_set_drive_mode below
-        # can reference it without a NameError when ROS is off.
-        from .mode_publisher import MODE_REMOTE_DRIVE
+        # Import the mode constants unconditionally so handlers below can
+        # reference them without a NameError when ROS is off.
+        from .mode_publisher import MODE_REMOTE_DRIVE, MODE_STOP
+
+    slots_load_error: str | None = None
+    if slots_path is None:
+        slots_path = str(default_slots_path())
+    try:
+        slots = load_slots(slots_path)
+    except SlotsConfigError as e:
+        slots = {}
+        slots_load_error = f"slots: {e}"
+        print(f"[sim] {slots_load_error}", flush=True)
 
     pygame.init()
     pygame.display.set_caption("Drawing Robot Simulator")
@@ -386,6 +398,41 @@ def run(ros_enabled: bool = False,
         state.last_console_msg = f"published Int8({MODE_REMOTE_DRIVE}) → {mode_topic}"
         state.last_console_msg_is_error = False
 
+    def make_on_slot(slot_idx: int):
+        # Captured-by-value closure for the slot button click.
+        def handler():
+            if mode_publisher is None:
+                state.last_console_msg = "needs --ros to publish /robot/mode_cmd"
+                state.last_console_msg_is_error = True
+                return
+            try:
+                mode_publisher.publish_script_slot(slot_idx)
+            except Exception as e:
+                state.last_console_msg = f"slot publish failed: {e}"
+                state.last_console_msg_is_error = True
+                return
+            entry = slots.get(slot_idx)
+            label = entry.script if entry else "(empty slot)"
+            state.last_console_msg = (
+                f"published Int8({80 + slot_idx}) → {mode_topic}  [{label}]"
+            )
+            state.last_console_msg_is_error = False
+        return handler
+
+    def on_stop_remote():
+        if mode_publisher is None:
+            state.last_console_msg = "needs --ros to publish /robot/mode_cmd"
+            state.last_console_msg_is_error = True
+            return
+        try:
+            mode_publisher.publish_mode(MODE_STOP)
+        except Exception as e:
+            state.last_console_msg = f"stop publish failed: {e}"
+            state.last_console_msg_is_error = True
+            return
+        state.last_console_msg = f"published Int8({MODE_STOP}) → {mode_topic}  [STOP]"
+        state.last_console_msg_is_error = False
+
     def on_console_submit(line: str):
         pending_warnings.clear()
         try:
@@ -418,6 +465,41 @@ def run(ros_enabled: bool = False,
                   "Set LULOC2 → drive mode (3)", on_set_drive_mode,
                   enabled=mode_publisher is not None),
     ]
+
+    # Slots panel: 2 rows × 5 columns of slot buttons + a wide STOP row.
+    # Disabled when --ros is off (mode_publisher absent) or when the slot
+    # is unconfigured. The handler still gets a chance to surface a hint
+    # in the console message line — Button.handle_event fires regardless.
+    SLOTS_HEADER_Y = 810
+    SLOT_ROW1_Y = 836
+    SLOT_ROW2_Y = 876
+    SLOT_STOP_Y = 916
+    SLOT_BTN_H = 34
+    SLOT_GAP = 6
+    slot_btn_w = (INNER_W - 4 * SLOT_GAP) // 5
+
+    slot_buttons: list[ui.Button] = []
+    for i in range(10):
+        row = i // 5
+        col = i % 5
+        x = PANEL_X + PADDING + col * (slot_btn_w + SLOT_GAP)
+        y = SLOT_ROW1_Y if row == 0 else SLOT_ROW2_Y
+        entry = slots.get(i)
+        label = f"{i}: {entry.label}" if entry else f"{i}: —"
+        slot_buttons.append(ui.Button(
+            pygame.Rect(x, y, slot_btn_w, SLOT_BTN_H),
+            label,
+            make_on_slot(i),
+            enabled=(mode_publisher is not None and entry is not None),
+        ))
+    stop_button = ui.Button(
+        pygame.Rect(PANEL_X + PADDING, SLOT_STOP_Y, INNER_W, 30),
+        "STOP (Int8 0)",
+        on_stop_remote,
+        enabled=mode_publisher is not None,
+    )
+    buttons.extend(slot_buttons)
+    buttons.append(stop_button)
 
     cycler = ui.Cycler(
         rect=pygame.Rect(PANEL_X + PADDING, 478, INNER_W, 32),
@@ -612,6 +694,15 @@ def run(ros_enabled: bool = False,
             ui.draw_text(screen, mono, display,
                          (PANEL_X + PADDING, program_y + 22 + i * 18),
                          ui.COLOR_TEXT_DIM)
+
+        ui.draw_divider(screen, PANEL_X + PADDING, SLOTS_HEADER_Y - 10, INNER_W)
+        slots_header = f"Remote slots → {mode_topic}"
+        if slots_load_error:
+            slots_header += "  (config error — see console)"
+        elif mode_publisher is None:
+            slots_header += "  (needs --ros)"
+        ui.draw_text(screen, font, slots_header,
+                     (PANEL_X + PADDING, SLOTS_HEADER_Y))
 
         pygame.display.flip()
 
