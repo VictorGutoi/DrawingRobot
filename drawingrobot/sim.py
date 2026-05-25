@@ -69,6 +69,7 @@ class SimState:
     ghost_trace_segments: list[list[tuple[float, float]]] = field(default_factory=lambda: [[]])
     last_console_msg: str = ""
     last_console_msg_is_error: bool = False
+    show_robot: bool = True
 
     def current_segment(self) -> list[tuple[float, float]]:
         return self.trace_segments[-1]
@@ -285,11 +286,13 @@ def run(ros_enabled: bool = False,
 
     publisher = None
     mode_publisher = None
+    twist_listener = None
     if ros_enabled:
-        from .ros_publisher import RosPublisher
+        from .ros_publisher import RosPublisher, TwistListener
         from .mode_publisher import ModePublisher, MODE_REMOTE_DRIVE, MODE_STOP
         publisher = RosPublisher(topic=ros_topic)
         mode_publisher = ModePublisher(topic=mode_topic)
+        twist_listener = TwistListener(topic=ros_topic)
     else:
         # Import the mode constants unconditionally so handlers below can
         # reference them without a NameError when ROS is off.
@@ -454,11 +457,22 @@ def run(ros_enabled: bool = False,
         state.last_console_msg_is_error = False
 
     btn_y = 380
-    btn_w = (INNER_W - 16) // 3
+    btn_w = (INNER_W - 24) // 4
+    toggle_robot_btn = ui.Button(
+        pygame.Rect(PANEL_X + PADDING + 3 * (btn_w + 8), btn_y, btn_w, 36),
+        "Hide Robot", lambda: None)  # on_click set below once we can reference btn
+
+    def on_toggle_robot():
+        state.show_robot = not state.show_robot
+        toggle_robot_btn.label = "Show Robot" if not state.show_robot else "Hide Robot"
+
+    toggle_robot_btn.on_click = on_toggle_robot
+
     buttons = [
         ui.Button(pygame.Rect(PANEL_X + PADDING, btn_y, btn_w, 36), "Start", on_start),
         ui.Button(pygame.Rect(PANEL_X + PADDING + btn_w + 8, btn_y, btn_w, 36), "Stop", on_stop),
         ui.Button(pygame.Rect(PANEL_X + PADDING + 2 * (btn_w + 8), btn_y, btn_w, 36), "Reset", on_reset),
+        toggle_robot_btn,
         # LULOC2: publish Int8(3) to /robot/mode_cmd. Sits between the script
         # cycler (bottom y≈510) and the console divider (y=555).
         ui.Button(pygame.Rect(PANEL_X + PADDING, 518, INNER_W, 32),
@@ -525,8 +539,10 @@ def run(ros_enabled: bool = False,
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                # Tear down mode publisher first — it doesn't own rclpy, so
-                # RosPublisher.close() can shut down the context cleanly last.
+                # Tear down listener and mode publisher first — neither owns
+                # rclpy, so RosPublisher.close() shuts down the context last.
+                if twist_listener is not None:
+                    twist_listener.close()
                 if mode_publisher is not None:
                     mode_publisher.close()
                 if publisher is not None:
@@ -571,7 +587,18 @@ def run(ros_enabled: bool = False,
 
         pen_body = state.geometry.pen_offset(state.pen_s_normalized * state.geometry.perimeter)
 
+        # Drain the wire every frame so the listener buffer doesn't grow stale.
+        # When the local script is running we discard the sample (avoids
+        # feeding our own publish back through the subscriber); when it isn't,
+        # we integrate the wire's (v, ω) into the main pose/trace — the sim
+        # becomes a passive visualiser of whoever else is on /cmd_vel.
+        listen_active = False
+        if twist_listener is not None:
+            twist_listener.spin_once(timeout_s=0.0)
+
         if state.running and not state.runner.done:
+            if twist_listener is not None:
+                twist_listener.pop_latest()  # discard self-publish echo
             for v_left, v_right, sub_dt in state.runner.consume(dt):
                 # Integrate the script's intended velocities — main render shows
                 # what was asked for. Limits apply only to the ROS publish, as
@@ -604,11 +631,28 @@ def run(ros_enabled: bool = False,
             last_wheel_v_clamped = (0.0, 0.0)
 
         if not state.running:
-            last_v, last_omega = 0.0, 0.0
-            last_wheel_v = (0.0, 0.0)
-            last_wheel_v_clamped = (0.0, 0.0)
+            wire = twist_listener.pop_latest() if twist_listener is not None else None
+            if wire is not None:
+                listen_active = True
+                v_wire, omega_wire = wire
+                half_w = 0.5 * state.geometry.width
+                v_left = v_wire - omega_wire * half_w
+                v_right = v_wire + omega_wire * half_w
+                state.pose = step(state.pose, v_left, v_right,
+                                  state.geometry.width, dt)
+                state.current_segment().append(transform_point(state.pose, *pen_body))
+                last_v, last_omega = v_wire, omega_wire
+                last_wheel_v = (v_left, v_right)
+                last_wheel_v_clamped = (v_left, v_right)
+            else:
+                last_v, last_omega = 0.0, 0.0
+                last_wheel_v = (0.0, 0.0)
+                last_wheel_v_clamped = (0.0, 0.0)
 
-        if publisher is not None:
+        # Suppress the local publish when we're listening to someone else —
+        # two publishers fighting over /cmd_vel would confuse downstream
+        # consumers and (for our own subscriber) cause an integration loop.
+        if publisher is not None and not listen_active:
             publisher.publish(last_v, last_omega)
 
         pen_world = transform_point(state.pose, *pen_body)
@@ -621,12 +665,13 @@ def run(ros_enabled: bool = False,
             draw_trace(screen, state.ghost_trace_segments,
                        color=COLOR_GHOST_TRACE, width=2)
         draw_trace(screen, state.trace_segments)
-        if ghost_visible:
-            draw_robot(screen, state.geometry, state.ghost_pose,
-                       pen_body, ghost_pen_world, palette=PALETTE_GHOST,
-                       wheel_velocities=last_wheel_v_clamped)
-        draw_robot(screen, state.geometry, state.pose, pen_body, pen_world,
-                   wheel_velocities=last_wheel_v)
+        if state.show_robot:
+            if ghost_visible:
+                draw_robot(screen, state.geometry, state.ghost_pose,
+                           pen_body, ghost_pen_world, palette=PALETTE_GHOST,
+                           wheel_velocities=last_wheel_v_clamped)
+            draw_robot(screen, state.geometry, state.pose, pen_body, pen_world,
+                       wheel_velocities=last_wheel_v)
 
         ui.draw_panel_background(screen, pygame.Rect(PANEL_X, 0, PANEL_W, WINDOW_H))
         ui.draw_text(screen, title_font, "Drawing Robot Simulator",
@@ -657,8 +702,10 @@ def run(ros_enabled: bool = False,
                      f"Cmd: v={last_v * 0.01:+.3f} m/s  ω={last_omega:+.3f} rad/s",
                      (PANEL_X + PADDING, status_y + 66), ui.COLOR_TEXT_DIM)
         if publisher is not None:
-            ros_msg = (f"ROS: {ros_topic}  pubs={publisher.published_count}  "
-                       f"idle-skip={publisher.skipped_count}  "
+            rx = twist_listener.received_count if twist_listener else 0
+            source = "wire" if listen_active else ("local" if state.running else "idle")
+            ros_msg = (f"ROS {source}: {ros_topic}  pubs={publisher.published_count}  "
+                       f"rx={rx}  "
                        f"lim v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
                        f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
         elif limits is not NO_LIMITS:

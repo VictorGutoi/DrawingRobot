@@ -95,3 +95,60 @@ class RosPublisher:
         finally:
             if self._rclpy.ok():
                 self._rclpy.shutdown()
+
+
+class TwistListener:
+    """Subscribes to a Twist topic; exposes the latest unseen sample.
+
+    Mirrors `mode_publisher.ModeListener`: latched single-element buffer
+    (only the most recent sample is kept), `spin_once` drained from the
+    main loop. Does not own the rclpy lifecycle — `RosPublisher.close`
+    is the one that calls `rclpy.shutdown()`.
+
+    Units: returns (v_cm_s, omega_rad_s) to match `RosPublisher.publish`'s
+    inputs, so the sim can integrate without unit conversions.
+    """
+
+    def __init__(self, topic: str = "/cmd_vel",
+                 node_name: str = "drawingrobot_listener",
+                 verbose: bool = True):
+        try:
+            import rclpy
+            from geometry_msgs.msg import Twist
+        except ImportError as e:
+            raise RuntimeError(
+                "ROS2 packages not available (rclpy / geometry_msgs)."
+            ) from e
+
+        if not rclpy.ok():
+            rclpy.init()
+        self._rclpy = rclpy
+        self._node = rclpy.create_node(node_name)
+        self._subscription = self._node.create_subscription(
+            Twist, topic, self._on_msg, 10)
+        self.topic = topic
+        self.node_name = node_name
+        self.verbose = verbose
+        self.received_count = 0
+        self._latest: tuple[float, float] | None = None
+
+        if self.verbose:
+            print(f"[ROS listen] node='{node_name}'  topic='{topic}'", flush=True)
+
+    def _on_msg(self, msg) -> None:
+        # m/s on the wire (geometry_msgs/Twist convention) → cm/s for the sim.
+        self._latest = (float(msg.linear.x) * 100.0, float(msg.angular.z))
+        self.received_count += 1
+
+    def spin_once(self, timeout_s: float = 0.0) -> None:
+        self._rclpy.spin_once(self._node, timeout_sec=timeout_s)
+
+    def pop_latest(self) -> tuple[float, float] | None:
+        sample, self._latest = self._latest, None
+        return sample
+
+    def close(self) -> None:
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
