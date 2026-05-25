@@ -18,24 +18,29 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .commands import CommandRunner
+from .commands import CommandRunner, rescale_runner
 from .headless import _build_geometry
 from .kinematics import Pose, step
 from .limits import Limits, NO_LIMITS
 from .mode_publisher import (
+    DEFAULT_DRAWING_TIME_S,
     MODE_STOP,
+    duration_for_code,
     is_script_slot_code,
+    is_time_code,
     slot_for_code,
 )
 from .script import load_script, parse_script
 from .slots_config import SlotEntry, SlotsConfigError, load_slots
 
 
-def _build_runner(entry: SlotEntry, geometry, limits: Limits) -> CommandRunner:
+def _build_runner(entry: SlotEntry, geometry, limits: Limits,
+                  target_duration_s: float) -> CommandRunner:
     pen_body = geometry.pen_offset(entry.pen_s * geometry.perimeter)
     source = load_script(entry.script)
     cmds = parse_script(source, geometry, pen_body=pen_body, limits=limits)
-    return CommandRunner(cmds)
+    runner = CommandRunner(cmds)
+    return rescale_runner(runner, target_duration_s)
 
 
 def run_pi_service(slots_path: Path | str,
@@ -73,6 +78,9 @@ def run_pi_service(slots_path: Path | str,
     last_v = 0.0
     last_omega = 0.0
     current_slot: Optional[int] = None
+    target_duration_s = DEFAULT_DRAWING_TIME_S
+    print(f"[pi-service] target_duration={target_duration_s:.0f}s "
+          f"(change via /robot/mode_cmd Int8 75..79)")
 
     try:
         next_tick = time.monotonic()
@@ -88,6 +96,10 @@ def run_pi_service(slots_path: Path | str,
                     current_slot = None
                     pose = Pose(0.0, 0.0, 0.0)
                     last_v = last_omega = 0.0
+                elif is_time_code(code):
+                    target_duration_s = duration_for_code(code)
+                    print(f"[pi-service] target_duration={target_duration_s:.0f}s "
+                          f"(applies to next slot launch)")
                 elif is_script_slot_code(code):
                     slot = slot_for_code(code)
                     entry = slots.get(slot)
@@ -96,12 +108,15 @@ def run_pi_service(slots_path: Path | str,
                     else:
                         if runner is not None:
                             print(f"[pi-service] cancelling slot {current_slot} "
-                                  f"→ starting slot {slot} ({entry.script})")
+                                  f"→ starting slot {slot} ({entry.script}, "
+                                  f"target={target_duration_s:.0f}s)")
                         else:
-                            print(f"[pi-service] starting slot {slot} ({entry.script})")
+                            print(f"[pi-service] starting slot {slot} ({entry.script}, "
+                                  f"target={target_duration_s:.0f}s)")
                         publisher.publish(0.0, 0.0, force=True)
                         try:
-                            runner = _build_runner(entry, geometry, limits)
+                            runner = _build_runner(entry, geometry, limits,
+                                                   target_duration_s)
                         except Exception as e:
                             print(f"[pi-service] failed to plan slot {slot}: {e}")
                             runner = None

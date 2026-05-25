@@ -35,6 +35,14 @@ MODE_STOP = MODE_NONE
 MODE_SCRIPT_BASE = 80
 MODE_SCRIPT_MAX = 89
 
+# Drawing-time presets: codes 75..79 set the pi_service's target run duration
+# (uniform rescale applied at slot launch). Indices line up with TIME_PRESETS
+# (75 → 20 s, 76 → 30 s, ..., 79 → 60 s).
+MODE_TIME_BASE = 75
+MODE_TIME_MAX = 79
+TIME_PRESETS = (20.0, 30.0, 40.0, 50.0, 60.0)
+DEFAULT_DRAWING_TIME_S = 50.0
+
 
 def is_script_slot_code(code: int) -> bool:
     return MODE_SCRIPT_BASE <= code <= MODE_SCRIPT_MAX
@@ -46,6 +54,18 @@ def slot_for_code(code: int) -> int:
 
 def code_for_slot(slot: int) -> int:
     return MODE_SCRIPT_BASE + slot
+
+
+def is_time_code(code: int) -> bool:
+    return MODE_TIME_BASE <= code <= MODE_TIME_MAX
+
+
+def duration_for_code(code: int) -> float:
+    return TIME_PRESETS[code - MODE_TIME_BASE]
+
+
+def code_for_time_index(idx: int) -> int:
+    return MODE_TIME_BASE + idx
 
 
 class ModePublisher:
@@ -93,6 +113,13 @@ class ModePublisher:
                 f"got {slot}"
             )
         self.publish_mode(code_for_slot(slot))
+
+    def publish_time_preset(self, idx: int) -> None:
+        if idx < 0 or idx >= len(TIME_PRESETS):
+            raise ValueError(
+                f"time preset index must be in [0, {len(TIME_PRESETS) - 1}], got {idx}"
+            )
+        self.publish_mode(code_for_time_index(idx))
 
     def publish_stop(self) -> None:
         self.publish_mode(MODE_STOP)

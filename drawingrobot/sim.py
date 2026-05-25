@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 import pygame
 
-from .commands import CommandRunner, WheelCommand
+from .commands import CommandRunner, WheelCommand, rescale_runner
 from .kinematics import Pose, step, transform_point
 from .limits import Limits, NO_LIMITS
 from .robot import RobotGeometry
@@ -11,7 +11,7 @@ from .slots_config import SlotsConfigError, default_slots_path, load_slots
 from . import ui
 
 
-WINDOW_W, WINDOW_H = 1200, 960
+WINDOW_W, WINDOW_H = 1200, 1010
 CANVAS_W = 800
 PANEL_X = CANVAS_W
 PANEL_W = WINDOW_W - CANVAS_W
@@ -222,7 +222,7 @@ def make_sliders() -> dict[str, ui.Slider]:
         "pen_s": ui.Slider(pygame.Rect(x, 260, INNER_W, 6),
                            "Pen position (along outline)", 0.0, 1.0, 0.0, "{:.3f}"),
         "total_time_s": ui.Slider(pygame.Rect(x, 320, INNER_W, 6),
-                                  "Total run time (s)", 5.0, 120.0, 30.0, "{:.0f}"),
+                                  "Total run time (s)", 5.0, 120.0, 50.0, "{:.0f}"),
     }
 
 
@@ -250,26 +250,6 @@ def build_runner(source: str, geometry: RobotGeometry,
         return CommandRunner([]), str(e)
 
 
-def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
-    """Uniformly scale all commands so the runner's total duration = target_time.
-
-    Path geometry is preserved (same wheel-velocity ratios, same per-command
-    distance) — only the timing changes. Velocities × scale, duration / scale.
-    No-op if the runner is empty or target_time is non-positive.
-    """
-    cmds = runner._commands
-    if not cmds or target_time <= 0:
-        return runner
-    total = sum(c.duration for c in cmds)
-    if total <= 0:
-        return runner
-    scale = total / target_time
-    return CommandRunner([
-        WheelCommand(c.v_left * scale, c.v_right * scale, c.duration / scale)
-        for c in cmds
-    ])
-
-
 def run(ros_enabled: bool = False,
         ros_topic: str = "/cmd_vel",
         limits: Limits | None = None,
@@ -289,14 +269,16 @@ def run(ros_enabled: bool = False,
     twist_listener = None
     if ros_enabled:
         from .ros_publisher import RosPublisher, TwistListener
-        from .mode_publisher import ModePublisher, MODE_REMOTE_DRIVE, MODE_STOP
+        from .mode_publisher import (
+            ModePublisher, MODE_REMOTE_DRIVE, MODE_STOP, TIME_PRESETS,
+        )
         publisher = RosPublisher(topic=ros_topic)
         mode_publisher = ModePublisher(topic=mode_topic)
         twist_listener = TwistListener(topic=ros_topic)
     else:
         # Import the mode constants unconditionally so handlers below can
         # reference them without a NameError when ROS is off.
-        from .mode_publisher import MODE_REMOTE_DRIVE, MODE_STOP
+        from .mode_publisher import MODE_REMOTE_DRIVE, MODE_STOP, TIME_PRESETS
 
     slots_load_error: str | None = None
     if slots_path is None:
@@ -322,7 +304,7 @@ def run(ros_enabled: bool = False,
     initial_runner, _ = build_runner(
         initial_source, geometry, geometry.pen_offset(0.0),
         limits=limits, on_warning=record_warning)
-    initial_runner = rescale_runner(initial_runner, 30.0)  # match slider default
+    initial_runner = rescale_runner(initial_runner, 50.0)  # match slider default
 
     state = SimState(
         geometry=geometry,
@@ -436,6 +418,28 @@ def run(ros_enabled: bool = False,
         state.last_console_msg = f"published Int8({MODE_STOP}) → {mode_topic}  [STOP]"
         state.last_console_msg_is_error = False
 
+    def make_on_time_preset(idx: int):
+        # Sets the Pi service's target_duration_s for the next slot launch.
+        # Also nudges the local slider so the sim preview matches.
+        def handler():
+            if mode_publisher is None:
+                state.last_console_msg = "needs --ros to publish /robot/mode_cmd"
+                state.last_console_msg_is_error = True
+                return
+            duration_s = TIME_PRESETS[idx]
+            try:
+                mode_publisher.publish_time_preset(idx)
+            except Exception as e:
+                state.last_console_msg = f"time publish failed: {e}"
+                state.last_console_msg_is_error = True
+                return
+            sliders["total_time_s"].value = duration_s
+            state.last_console_msg = (
+                f"published Int8({75 + idx}) → {mode_topic}  [{duration_s:.0f}s]"
+            )
+            state.last_console_msg_is_error = False
+        return handler
+
     def on_console_submit(line: str):
         pending_warnings.clear()
         try:
@@ -487,7 +491,8 @@ def run(ros_enabled: bool = False,
     SLOTS_HEADER_Y = 810
     SLOT_ROW1_Y = 836
     SLOT_ROW2_Y = 876
-    SLOT_STOP_Y = 916
+    SLOT_TIME_Y = 924
+    SLOT_STOP_Y = 964
     SLOT_BTN_H = 34
     SLOT_GAP = 6
     slot_btn_w = (INNER_W - 4 * SLOT_GAP) // 5
@@ -506,6 +511,19 @@ def run(ros_enabled: bool = False,
             make_on_slot(i),
             enabled=(mode_publisher is not None and entry is not None),
         ))
+
+    # Drawing-time preset row: 5 buttons publishing Int8 75..79. The Pi
+    # service applies the new target_duration on the *next* slot launch.
+    time_buttons: list[ui.Button] = []
+    for i, duration_s in enumerate(TIME_PRESETS):
+        x = PANEL_X + PADDING + i * (slot_btn_w + SLOT_GAP)
+        time_buttons.append(ui.Button(
+            pygame.Rect(x, SLOT_TIME_Y, slot_btn_w, 30),
+            f"{int(duration_s)}s",
+            make_on_time_preset(i),
+            enabled=mode_publisher is not None,
+        ))
+
     stop_button = ui.Button(
         pygame.Rect(PANEL_X + PADDING, SLOT_STOP_Y, INNER_W, 30),
         "STOP (Int8 0)",
@@ -513,6 +531,7 @@ def run(ros_enabled: bool = False,
         enabled=mode_publisher is not None,
     )
     buttons.extend(slot_buttons)
+    buttons.extend(time_buttons)
     buttons.append(stop_button)
 
     cycler = ui.Cycler(
@@ -750,7 +769,6 @@ def run(ros_enabled: bool = False,
             slots_header += "  (needs --ros)"
         ui.draw_text(screen, font, slots_header,
                      (PANEL_X + PADDING, SLOTS_HEADER_Y))
-
         pygame.display.flip()
 
 

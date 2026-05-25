@@ -109,3 +109,23 @@ class CommandRunner:
 
     def append(self, commands: Iterable[WheelCommand]) -> None:
         self._commands.extend(commands)
+
+
+def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
+    """Uniformly scale all commands so the runner's total duration = target_time.
+
+    Path geometry is preserved (same wheel-velocity ratios, same per-command
+    distance) — only the timing changes. Velocities × scale, duration / scale.
+    No-op if the runner is empty or target_time is non-positive.
+    """
+    cmds = runner._commands
+    if not cmds or target_time <= 0:
+        return runner
+    total = sum(c.duration for c in cmds)
+    if total <= 0:
+        return runner
+    scale = total / target_time
+    return CommandRunner([
+        WheelCommand(c.v_left * scale, c.v_right * scale, c.duration / scale)
+        for c in cmds
+    ])
