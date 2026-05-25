@@ -1,8 +1,0 @@
-# Edge-aligned square: each edge is exactly straight on the pen's trace, with
-# corner curves of radius |pen_body| localized at each vertex (no bulges
-# stretching across the polyline). Compare against `square_pen` which visits
-# the same corners but lets the unavoidable arc dominate the inter-corner path.
-line_to 30 0
-line_to 30 30
-line_to 0 30
-line_to 0 0

@@ -1,0 +1,4 @@
+r_trace 10 0
+r_trace 0 10
+r_trace -10 0
+r_trace 0 -10
