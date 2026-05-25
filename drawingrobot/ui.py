@@ -68,6 +68,9 @@ class Button:
     rect: pygame.Rect
     label: str
     on_click: Callable[[], None]
+    # Visual hint only — on_click still fires when disabled, so the handler can
+    # surface a "why this is unavailable" message in the console line.
+    enabled: bool = True
     _hover: bool = field(default=False, init=False)
     _pressed: bool = field(default=False, init=False)
 
@@ -87,14 +90,20 @@ class Button:
         return False
 
     def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
-        if self._pressed:
+        if not self.enabled:
+            color = COLOR_TRACK
+            text_color = COLOR_TEXT_DIM
+        elif self._pressed:
             color = COLOR_BTN_ACTIVE
+            text_color = COLOR_TEXT
         elif self._hover:
             color = COLOR_BTN_HOVER
+            text_color = COLOR_TEXT
         else:
             color = COLOR_BTN
+            text_color = COLOR_TEXT
         pygame.draw.rect(surface, color, self.rect, border_radius=6)
-        text = font.render(self.label, True, COLOR_TEXT)
+        text = font.render(self.label, True, text_color)
         surface.blit(text, text.get_rect(center=self.rect.center))
 
 

@@ -270,7 +270,8 @@ def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
 
 def run(ros_enabled: bool = False,
         ros_topic: str = "/cmd_vel",
-        limits: Limits | None = None) -> None:
+        limits: Limits | None = None,
+        mode_topic: str = "/robot/mode_cmd") -> None:
     if limits is None:
         limits = NO_LIMITS
 
@@ -281,9 +282,16 @@ def run(ros_enabled: bool = False,
         pending_warnings.append(msg)
 
     publisher = None
+    mode_publisher = None
     if ros_enabled:
         from .ros_publisher import RosPublisher
+        from .mode_publisher import ModePublisher, MODE_REMOTE_DRIVE
         publisher = RosPublisher(topic=ros_topic)
+        mode_publisher = ModePublisher(topic=mode_topic)
+    else:
+        # Import the mode constant unconditionally so on_set_drive_mode below
+        # can reference it without a NameError when ROS is off.
+        from .mode_publisher import MODE_REMOTE_DRIVE
 
     pygame.init()
     pygame.display.set_caption("Drawing Robot Simulator")
@@ -364,6 +372,20 @@ def run(ros_enabled: bool = False,
         state.last_console_msg = f"loaded {name}"
         state.last_console_msg_is_error = False
 
+    def on_set_drive_mode():
+        if mode_publisher is None:
+            state.last_console_msg = "needs --ros to publish /robot/mode_cmd"
+            state.last_console_msg_is_error = True
+            return
+        try:
+            mode_publisher.publish_mode(MODE_REMOTE_DRIVE)
+        except Exception as e:
+            state.last_console_msg = f"mode publish failed: {e}"
+            state.last_console_msg_is_error = True
+            return
+        state.last_console_msg = f"published Int8({MODE_REMOTE_DRIVE}) → {mode_topic}"
+        state.last_console_msg_is_error = False
+
     def on_console_submit(line: str):
         pending_warnings.clear()
         try:
@@ -390,6 +412,11 @@ def run(ros_enabled: bool = False,
         ui.Button(pygame.Rect(PANEL_X + PADDING, btn_y, btn_w, 36), "Start", on_start),
         ui.Button(pygame.Rect(PANEL_X + PADDING + btn_w + 8, btn_y, btn_w, 36), "Stop", on_stop),
         ui.Button(pygame.Rect(PANEL_X + PADDING + 2 * (btn_w + 8), btn_y, btn_w, 36), "Reset", on_reset),
+        # LULOC2: publish Int8(3) to /robot/mode_cmd. Sits between the script
+        # cycler (bottom y≈510) and the console divider (y=555).
+        ui.Button(pygame.Rect(PANEL_X + PADDING, 518, INNER_W, 32),
+                  "Set LULOC2 → drive mode (3)", on_set_drive_mode,
+                  enabled=mode_publisher is not None),
     ]
 
     cycler = ui.Cycler(
@@ -416,6 +443,10 @@ def run(ros_enabled: bool = False,
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                # Tear down mode publisher first — it doesn't own rclpy, so
+                # RosPublisher.close() can shut down the context cleanly last.
+                if mode_publisher is not None:
+                    mode_publisher.close()
                 if publisher is not None:
                     publisher.publish(0.0, 0.0, force=True)
                     publisher.close()

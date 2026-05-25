@@ -15,6 +15,10 @@ def main() -> None:
                         help="Publish the commanded body velocity to a ROS2 topic.")
     parser.add_argument("--ros-topic", default="/cmd_vel",
                         help="ROS2 topic name (default: /cmd_vel).")
+    parser.add_argument("--mode-topic", default="/robot/mode_cmd",
+                        help="ROS2 topic for the LULOC2 mode-set button "
+                             "(std_msgs/Int8, default: /robot/mode_cmd). "
+                             "Requires --ros.")
     parser.add_argument("--max-linear", type=float, default=0.5,
                         metavar="M_S",
                         help="Linear-speed ceiling in m/s (default: 0.5). "
@@ -55,7 +59,8 @@ def main() -> None:
         )
     else:
         from .sim import run
-        run(ros_enabled=args.ros, ros_topic=args.ros_topic, limits=limits)
+        run(ros_enabled=args.ros, ros_topic=args.ros_topic, limits=limits,
+            mode_topic=args.mode_topic)
 
 
 if __name__ == "__main__":
