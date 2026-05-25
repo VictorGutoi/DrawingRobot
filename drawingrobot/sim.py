@@ -70,6 +70,10 @@ class SimState:
     last_console_msg: str = ""
     last_console_msg_is_error: bool = False
     show_robot: bool = True
+    # True when the active run was triggered by a remote-slot click. The Pi
+    # service will publish /cmd_vel for it; suppress local publish so we
+    # don't double-source the topic.
+    remote_initiated: bool = False
 
     def current_segment(self) -> list[tuple[float, float]]:
         return self.trace_segments[-1]
@@ -342,6 +346,8 @@ def run(ros_enabled: bool = False,
         if state.runner.done:
             rebuild_runner()
             reset_pose_and_trace()
+        # Local Start = locally-driven run; restore /cmd_vel publishing.
+        state.remote_initiated = False
         state.running = True
         state.break_trace()
 
@@ -351,6 +357,7 @@ def run(ros_enabled: bool = False,
 
     def on_reset():
         state.running = False
+        state.remote_initiated = False
         rebuild_runner()
         reset_pose_and_trace()
         state.last_console_msg = ""
@@ -385,6 +392,10 @@ def run(ros_enabled: bool = False,
 
     def make_on_slot(slot_idx: int):
         # Captured-by-value closure for the slot button click.
+        # Publishes the mode code AND starts the same script locally so the
+        # sim's main car traces what the Pi service will be doing. The
+        # remote_initiated flag suppresses local /cmd_vel publishing — the
+        # Pi service owns that topic for this run; the ghost mirrors it.
         def handler():
             if mode_publisher is None:
                 state.last_console_msg = "needs --ros to publish /robot/mode_cmd"
@@ -397,9 +408,29 @@ def run(ros_enabled: bool = False,
                 state.last_console_msg_is_error = True
                 return
             entry = slots.get(slot_idx)
-            label = entry.script if entry else "(empty slot)"
+            if entry is None:
+                state.last_console_msg = (
+                    f"published Int8({80 + slot_idx}) → {mode_topic}  [empty slot]"
+                )
+                state.last_console_msg_is_error = False
+                return
+            try:
+                state.program_source = load_script(entry.script)
+            except OSError as e:
+                state.last_console_msg = (
+                    f"published Int8({80 + slot_idx}) but local script load "
+                    f"failed: {e}"
+                )
+                state.last_console_msg_is_error = True
+                return
+            rebuild_runner()
+            reset_pose_and_trace()
+            state.remote_initiated = True
+            state.running = True
+            state.break_trace()
             state.last_console_msg = (
-                f"published Int8({80 + slot_idx}) → {mode_topic}  [{label}]"
+                f"published Int8({80 + slot_idx}) → {mode_topic}  "
+                f"[{entry.script}] + local run"
             )
             state.last_console_msg_is_error = False
         return handler
@@ -606,77 +637,57 @@ def run(ros_enabled: bool = False,
 
         pen_body = state.geometry.pen_offset(state.pen_s_normalized * state.geometry.perimeter)
 
-        # Drain the wire every frame so the listener buffer doesn't grow stale.
-        # When the local script is running we discard the sample (avoids
-        # feeding our own publish back through the subscriber); when it isn't,
-        # we integrate the wire's (v, ω) into the main pose/trace — the sim
-        # becomes a passive visualiser of whoever else is on /cmd_vel.
-        listen_active = False
+        # Ghost is the wire mirror: every frame, drain the listener and
+        # integrate whatever (v, ω) was last seen on /cmd_vel into the ghost
+        # pose/trace. Source-agnostic — could be the Pi service replaying a
+        # slot, or our own publish coming back when we're locally driving.
         if twist_listener is not None:
             twist_listener.spin_once(timeout_s=0.0)
+            wire = twist_listener.pop_latest()
+            if wire is not None:
+                v_wire, omega_wire = wire
+                half_w = 0.5 * state.geometry.width
+                v_left_w = v_wire - omega_wire * half_w
+                v_right_w = v_wire + omega_wire * half_w
+                state.ghost_pose = step(state.ghost_pose, v_left_w, v_right_w,
+                                        state.geometry.width, dt)
+                state.current_ghost_segment().append(
+                    transform_point(state.ghost_pose, *pen_body))
+                last_wheel_v_clamped = (v_left_w, v_right_w)
 
+        # Main car is the script mirror: only moves while the local runner
+        # is active. Pose integrates the script's intended velocities;
+        # limits affect only the publish path.
         if state.running and not state.runner.done:
-            if twist_listener is not None:
-                twist_listener.pop_latest()  # discard self-publish echo
             for v_left, v_right, sub_dt in state.runner.consume(dt):
-                # Integrate the script's intended velocities — main render shows
-                # what was asked for. Limits apply only to the ROS publish, as
-                # a hardware safety net (clamping the integration would mangle
-                # `trace` corners, where peak |ω| spikes far above the ceiling).
                 state.pose = step(state.pose, v_left, v_right, state.geometry.width, sub_dt)
                 state.current_segment().append(transform_point(state.pose, *pen_body))
                 v = 0.5 * (v_left + v_right)
                 omega = (v_right - v_left) / state.geometry.width
                 last_v, last_omega = limits.clamp_vw(v, omega)
-
-                # Ghost integrates the *clamped* (v, ω) — the values that
-                # actually go on /cmd_vel — so the user can see how the limits
-                # will distort the trace on the real robot.
-                half_w = 0.5 * state.geometry.width
-                v_left_clamped = last_v - last_omega * half_w
-                v_right_clamped = last_v + last_omega * half_w
-                state.ghost_pose = step(state.ghost_pose,
-                                        v_left_clamped, v_right_clamped,
-                                        state.geometry.width, sub_dt)
-                state.current_ghost_segment().append(
-                    transform_point(state.ghost_pose, *pen_body))
-
                 last_wheel_v = (v_left, v_right)
-                last_wheel_v_clamped = (v_left_clamped, v_right_clamped)
         elif state.runner.done and state.running:
             state.running = False
+            state.remote_initiated = False
             last_v, last_omega = 0.0, 0.0
             last_wheel_v = (0.0, 0.0)
-            last_wheel_v_clamped = (0.0, 0.0)
 
         if not state.running:
-            wire = twist_listener.pop_latest() if twist_listener is not None else None
-            if wire is not None:
-                listen_active = True
-                v_wire, omega_wire = wire
-                half_w = 0.5 * state.geometry.width
-                v_left = v_wire - omega_wire * half_w
-                v_right = v_wire + omega_wire * half_w
-                state.pose = step(state.pose, v_left, v_right,
-                                  state.geometry.width, dt)
-                state.current_segment().append(transform_point(state.pose, *pen_body))
-                last_v, last_omega = v_wire, omega_wire
-                last_wheel_v = (v_left, v_right)
-                last_wheel_v_clamped = (v_left, v_right)
-            else:
-                last_v, last_omega = 0.0, 0.0
-                last_wheel_v = (0.0, 0.0)
-                last_wheel_v_clamped = (0.0, 0.0)
+            last_v, last_omega = 0.0, 0.0
+            last_wheel_v = (0.0, 0.0)
 
-        # Suppress the local publish when we're listening to someone else —
-        # two publishers fighting over /cmd_vel would confuse downstream
-        # consumers and (for our own subscriber) cause an integration loop.
-        if publisher is not None and not listen_active:
+        # Publish /cmd_vel only when locally driving AND this run wasn't
+        # triggered by a slot click. Slot-click runs are mirrors of the Pi
+        # service's run — the Pi owns /cmd_vel; we'd otherwise double-source.
+        if (publisher is not None and state.running
+                and not state.remote_initiated):
             publisher.publish(last_v, last_omega)
 
         pen_world = transform_point(state.pose, *pen_body)
         ghost_pen_world = transform_point(state.ghost_pose, *pen_body)
-        ghost_visible = limits is not NO_LIMITS
+        # Ghost is the wire mirror; show it whenever we have a listener
+        # (i.e. --ros was passed). Without --ros it would just sit at origin.
+        ghost_visible = twist_listener is not None
 
         screen.fill((20, 22, 26))
         draw_canvas_background(screen)
@@ -722,8 +733,13 @@ def run(ros_enabled: bool = False,
                      (PANEL_X + PADDING, status_y + 66), ui.COLOR_TEXT_DIM)
         if publisher is not None:
             rx = twist_listener.received_count if twist_listener else 0
-            source = "wire" if listen_active else ("local" if state.running else "idle")
-            ros_msg = (f"ROS {source}: {ros_topic}  pubs={publisher.published_count}  "
+            if state.running and state.remote_initiated:
+                drive = "remote+local"     # Pi publishes, sim mirrors locally
+            elif state.running:
+                drive = "local"            # sim publishes /cmd_vel
+            else:
+                drive = "idle"
+            ros_msg = (f"ROS {drive}: {ros_topic}  pubs={publisher.published_count}  "
                        f"rx={rx}  "
                        f"lim v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
                        f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
