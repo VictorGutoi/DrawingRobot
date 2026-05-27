@@ -157,7 +157,7 @@ Diagnostic scripts (kept, not deleted):
 - `./scripts/run_pi_listener.sh` — `ros2 topic echo /cmd_vel` inside a fresh Pi container with FastDDS + the Mac as unicast peer. Useful to confirm cross-host visibility before the agent is in the loop.
 - `./scripts/_ros_smoke_publisher.py` — 10 Hz Twist publisher, sanity-checks the publish path without the GUI.
 
-`scripts/bringup_pi.sh` and `scripts/dds/cyclone-{mac,pi}.xml` are legacy from a clean-slate flow that brought up its own serial-attached agent on the Pi with Cyclone DDS. They are unused by the current `bringup_mac.sh` but kept until the FastDDS path is fully verified. If you ever need to run on a Pi without the Luloc compose stack, those files document the alternative path.
+`scripts/bringup_pi.sh` first checks for any already-running agent-like container (matches `micro_ros_agent` / `microros_agent` / anything with `agent` in the name); if one is up it just follows its logs and exits. This is the steady-state on the actual Pi — the Luloc compose stack's `micro_ros_agent` is always running. Only if nothing is up does it fall back to launching its own serial-attached Cyclone-DDS agent (`scripts/dds/cyclone-pi.xml`), which is the original clean-slate flow kept for Pis without the compose stack.
 
 Stack gotchas:
 

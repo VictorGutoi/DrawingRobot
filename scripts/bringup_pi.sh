@@ -41,6 +41,23 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
+# --- Adopt existing agent if present -------------------------------------
+# The Luloc compose stack runs its own micro-ROS agent (`micro_ros_agent`,
+# FastDDS, UDP4 to the ESP32-P4 over ethernet) under restart: unless-stopped.
+# If any agent-like container is already up, just follow its logs instead of
+# trying to spawn our own — the serial preflight and Cyclone-DDS XML below
+# only apply when we're launching from scratch.
+
+EXISTING_AGENT="$(sudo docker ps --format '{{.Names}}' \
+    | awk 'tolower($0) ~ /micro.?ros|agent/ {print; exit}')"
+
+if [ -n "$EXISTING_AGENT" ]; then
+    echo "adopting existing agent container: $EXISTING_AGENT"
+    sudo docker logs --tail 5 "$EXISTING_AGENT" 2>&1 || true
+    echo "agent ready (adopted — not managed by this script)"
+    exec sudo docker logs -f "$EXISTING_AGENT"
+fi
+
 if [ ! -f "$DDS_XML" ]; then
     echo "ERROR: missing $DDS_XML — run bringup_mac.sh from your laptop to sync the repo" >&2
     exit 1
