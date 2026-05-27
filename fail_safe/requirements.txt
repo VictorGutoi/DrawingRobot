@@ -1,0 +1,3 @@
+pygame>=2.5
+# rclpy / geometry_msgs / std_msgs come from a ROS2 install (conda/RoboStack
+# or system packages) — installed separately, not via pip.

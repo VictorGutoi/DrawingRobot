@@ -1,0 +1,8 @@
+# 20 cm square. Pen stays still during each `turn`, so corners are sharp.
+forward 30
+turn 80
+forward 30
+turn 90
+forward 30
+turn 87
+forward 35

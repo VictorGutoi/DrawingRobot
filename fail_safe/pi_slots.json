@@ -1,0 +1,8 @@
+{
+  "slots": [
+    { "index": 0, "script": "square",    "label": "Square" },
+    { "index": 1, "script": "rectangle", "label": "Rectangle" },
+    { "index": 2, "script": "triangle",  "label": "Triangle" },
+    { "index": 3, "script": "circle",    "label": "Circle" }
+  ]
+}

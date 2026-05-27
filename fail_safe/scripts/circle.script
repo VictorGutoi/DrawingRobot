@@ -1,0 +1,3 @@
+# Pen-traced CCW circle, radius 15 cm at 12 cm/s tangential pen speed.
+speed 12
+circle 15

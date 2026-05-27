@@ -1,0 +1,12 @@
+# 30 cm x 15 cm rectangle.
+forward 40
+forward -10
+turn 90
+forward 25
+forward -15
+turn 90
+forward 40
+forward -10
+turn 90
+forward 25
+turn 90

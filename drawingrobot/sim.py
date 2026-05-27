@@ -74,6 +74,10 @@ class SimState:
     # service will publish /cmd_vel for it; suppress local publish so we
     # don't double-source the topic.
     remote_initiated: bool = False
+    # Last (v, ω) sample received on /cmd_vel; held across frames so the
+    # ghost integrates every tick even when no new sample arrives that
+    # frame. None = never received any sample yet (don't integrate).
+    last_wire_vw: tuple[float, float] | None = None
 
     def current_segment(self) -> list[tuple[float, float]]:
         return self.trace_segments[-1]
@@ -358,6 +362,7 @@ def run(ros_enabled: bool = False,
     def on_reset():
         state.running = False
         state.remote_initiated = False
+        state.last_wire_vw = None
         rebuild_runner()
         reset_pose_and_trace()
         state.last_console_msg = ""
@@ -426,6 +431,7 @@ def run(ros_enabled: bool = False,
             rebuild_runner()
             reset_pose_and_trace()
             state.remote_initiated = True
+            state.last_wire_vw = None
             state.running = True
             state.break_trace()
             state.last_console_msg = (
@@ -638,14 +644,17 @@ def run(ros_enabled: bool = False,
         pen_body = state.geometry.pen_offset(state.pen_s_normalized * state.geometry.perimeter)
 
         # Ghost is the wire mirror: every frame, drain the listener and
-        # integrate whatever (v, ω) was last seen on /cmd_vel into the ghost
-        # pose/trace. Source-agnostic — could be the Pi service replaying a
-        # slot, or our own publish coming back when we're locally driving.
+        # integrate the most recently known (v, ω) sample into the ghost
+        # pose/trace. Zero-order hold — without it, frames with no new sample
+        # skip integration entirely while the real wheels are still spinning,
+        # so the ghost under-traces by a large factor under any wire jitter.
         if twist_listener is not None:
-            twist_listener.spin_once(timeout_s=0.0)
+            twist_listener.drain()
             wire = twist_listener.pop_latest()
             if wire is not None:
-                v_wire, omega_wire = wire
+                state.last_wire_vw = wire
+            if state.last_wire_vw is not None:
+                v_wire, omega_wire = state.last_wire_vw
                 half_w = 0.5 * state.geometry.width
                 v_left_w = v_wire - omega_wire * half_w
                 v_right_w = v_wire + omega_wire * half_w

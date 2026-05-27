@@ -24,7 +24,7 @@ class RosPublisher:
                  heartbeat_s: float = DEFAULT_HEARTBEAT_S):
         try:
             import rclpy
-            from geometry_msgs.msg import Twist
+                
         except ImportError as e:
             raise RuntimeError(
                 "ROS2 packages not available (rclpy / geometry_msgs). "
@@ -142,6 +142,17 @@ class TwistListener:
 
     def spin_once(self, timeout_s: float = 0.0) -> None:
         self._rclpy.spin_once(self._node, timeout_sec=timeout_s)
+
+    def drain(self, max_iters: int = 16) -> None:
+        # rclpy's spin_once(timeout_sec=0) processes at most one callback. At
+        # 60 Hz publish → 60 Hz consume, any jitter leaves samples queued; the
+        # next single spin only consumes one and the backlog grows. Loop until
+        # received_count stops changing (queue drained) or hit max_iters.
+        for _ in range(max_iters):
+            before = self.received_count
+            self._rclpy.spin_once(self._node, timeout_sec=0.0)
+            if self.received_count == before:
+                return
 
     def pop_latest(self) -> tuple[float, float] | None:
         sample, self._latest = self._latest, None
