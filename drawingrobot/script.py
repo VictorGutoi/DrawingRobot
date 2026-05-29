@@ -228,6 +228,59 @@ def _wrap_pi(angle: float) -> float:
     return angle
 
 
+def _rotate_translate_rotate(
+    pose_from: Pose,
+    target_x: float,
+    target_y: float,
+    theta_final: float,
+    wheelbase: float,
+    linear_speed: float,
+    angular_speed: float,
+) -> list[WheelCommand]:
+    """Generic rotate-translate-rotate from `pose_from` to `(target_x, target_y, theta_final)`.
+
+    Chooses forward or backward translation to minimize total rotation angle.
+    Emits up to three WheelCommands; near-zero rotations/translations are
+    omitted. With zero translation, collapses to a single rotate-to-heading.
+
+    Used by both `_plan_line_to` (pen-aware corner setup) and
+    `correction.plan_correction` (encoder-feedback drift correction).
+    """
+    delta_x = target_x - pose_from.x
+    delta_y = target_y - pose_from.y
+    delta_mag = hypot(delta_x, delta_y)
+
+    out: list[WheelCommand] = []
+
+    if delta_mag > 1e-12:
+        alpha_fwd = atan2(delta_y, delta_x)
+        alpha_bwd = _wrap_pi(alpha_fwd + pi)
+
+        def total_rot(a: float) -> float:
+            return abs(_wrap_pi(a - pose_from.theta)) + abs(_wrap_pi(theta_final - a))
+
+        if total_rot(alpha_fwd) <= total_rot(alpha_bwd):
+            alpha = alpha_fwd
+            d_setup = delta_mag
+        else:
+            alpha = alpha_bwd
+            d_setup = -delta_mag
+
+        rot1 = _wrap_pi(alpha - pose_from.theta)
+        if abs(rot1) > 1e-12:
+            out.append(rotate_in_place(rot1, wheelbase, angular_speed))
+        out.append(move_straight(d_setup, linear_speed))
+        rot2 = _wrap_pi(theta_final - alpha)
+        if abs(rot2) > 1e-12:
+            out.append(rotate_in_place(rot2, wheelbase, angular_speed))
+    else:
+        rot = _wrap_pi(theta_final - pose_from.theta)
+        if abs(rot) > 1e-12:
+            out.append(rotate_in_place(rot, wheelbase, angular_speed))
+
+    return out
+
+
 def _plan_line_to(
     target: tuple[float, float],
     pose: Pose,
@@ -264,38 +317,10 @@ def _plan_line_to(
     M_setup_x = pen_x - (px * cn - py * sn)
     M_setup_y = pen_y - (px * sn + py * cn)
 
-    delta_x = M_setup_x - pose.x
-    delta_y = M_setup_y - pose.y
-    delta_mag = hypot(delta_x, delta_y)
-
-    out: list[WheelCommand] = []
-
-    if delta_mag > 1e-12:
-        alpha_fwd = atan2(delta_y, delta_x)
-        alpha_bwd = _wrap_pi(alpha_fwd + pi)
-
-        def total_rot(a: float) -> float:
-            return abs(_wrap_pi(a - pose.theta)) + abs(_wrap_pi(theta_new - a))
-
-        if total_rot(alpha_fwd) <= total_rot(alpha_bwd):
-            alpha = alpha_fwd
-            d_setup = delta_mag
-        else:
-            alpha = alpha_bwd
-            d_setup = -delta_mag
-
-        rot1 = _wrap_pi(alpha - pose.theta)
-        if abs(rot1) > 1e-12:
-            out.append(rotate_in_place(rot1, geometry.width, angular_speed))
-        out.append(move_straight(d_setup, speed))
-        rot2 = _wrap_pi(theta_new - alpha)
-        if abs(rot2) > 1e-12:
-            out.append(rotate_in_place(rot2, geometry.width, angular_speed))
-    else:
-        rot = _wrap_pi(theta_new - pose.theta)
-        if abs(rot) > 1e-12:
-            out.append(rotate_in_place(rot, geometry.width, angular_speed))
-
+    out = _rotate_translate_rotate(
+        pose, M_setup_x, M_setup_y, theta_new,
+        geometry.width, speed, angular_speed,
+    )
     out.append(move_straight(edge_len, speed))
     return out
 

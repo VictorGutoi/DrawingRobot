@@ -2,4 +2,4 @@
 # underneath to make this happen — the pen path is the square, edges are
 # straight, corners are sharp (within 1/120 s discretisation).
 # Requires off-axis pen (px ≠ 0); fails for pen on the wheel-axis line.
-trace 30 0 30 30 0 30 0 0
+r_trace 30 0 30 30 0 30 0 0

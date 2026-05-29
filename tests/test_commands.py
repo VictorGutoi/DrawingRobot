@@ -82,3 +82,36 @@ def test_invalid_inputs():
         rotate_in_place(1.0, wheelbase=1.0, angular_speed=0.0)
     with pytest.raises(ValueError):
         arc(radius=0.0, angle=1.0, wheelbase=1.0, speed=1.0)
+
+
+def test_inject_empty_is_noop():
+    cmds = [move_straight(1.0, speed=1.0), move_straight(1.0, speed=1.0)]
+    runner = CommandRunner(list(cmds))
+    runner.inject([])
+    assert len(runner._commands) == 2
+
+
+def test_inject_mid_run_splices_after_current():
+    a = move_straight(2.0, speed=1.0)  # 2s
+    b = move_straight(3.0, speed=1.0)  # 3s
+    runner = CommandRunner([a, b])
+    runner.advance(1.0)  # mid-way through a
+    assert runner._idx == 0
+    correction = move_straight(0.5, speed=1.0)
+    runner.inject([correction])
+    # Current (a) keeps executing; correction sits between a and b.
+    assert runner._commands[0] is a
+    assert runner._commands[1] is correction
+    assert runner._commands[2] is b
+    assert runner._elapsed == 1.0
+
+
+def test_inject_when_done_revives_runner():
+    a = move_straight(1.0, speed=1.0)
+    runner = CommandRunner([a])
+    runner.advance(1.5)
+    assert runner.done
+    correction = move_straight(0.5, speed=1.0)
+    runner.inject([correction])
+    assert not runner.done
+    assert runner.current_velocities() == (1.0, 1.0)
