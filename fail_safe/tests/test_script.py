@@ -181,3 +181,35 @@ def test_rescale_runner_preserves_total_distance():
     c = scaled._commands[0]
     assert isclose(c.v_left, 5.0)
     assert isclose(c.duration, 4.0)
+
+
+# ---------- inject (encoder-feedback corrections) ----------
+
+def test_inject_empty_is_noop():
+    r = CommandRunner([WheelCommand(1.0, 1.0, 1.0), WheelCommand(2.0, 2.0, 1.0)])
+    r.inject([])
+    assert len(r._commands) == 2
+
+
+def test_inject_mid_run_splices_after_current():
+    a = WheelCommand(1.0, 1.0, 2.0)
+    b = WheelCommand(2.0, 2.0, 3.0)
+    r = CommandRunner([a, b])
+    r.advance(1.0)            # mid-way through a
+    assert r._idx == 0
+    corr = WheelCommand(5.0, 5.0, 0.5)
+    r.inject([corr])
+    assert r._commands[0] is a
+    assert r._commands[1] is corr
+    assert r._commands[2] is b
+    assert r._elapsed == 1.0  # current command's progress preserved
+
+
+def test_inject_when_done_revives_runner():
+    a = WheelCommand(1.0, 1.0, 1.0)
+    r = CommandRunner([a])
+    r.advance(1.5)
+    assert r.done
+    r.inject([WheelCommand(3.0, 3.0, 0.5)])
+    assert not r.done
+    assert r.current_velocities() == (3.0, 3.0)

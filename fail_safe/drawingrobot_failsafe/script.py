@@ -147,6 +147,20 @@ class CommandRunner:
     def append(self, commands: Iterable[WheelCommand]) -> None:
         self._commands.extend(commands)
 
+    def inject(self, commands: Iterable[WheelCommand]) -> None:
+        """Splice commands after the currently-executing one, before the next pending.
+
+        If `done`, inserts at the end and re-arms the runner so it picks up the
+        new commands on the next `consume()`. Does not touch `_elapsed` so the
+        in-flight command finishes cleanly before the injected sequence runs.
+        Used for encoder-feedback corrections fired at command boundaries.
+        """
+        cmds = list(commands)
+        if not cmds:
+            return
+        insert_at = self._idx if self.done else self._idx + 1
+        self._commands[insert_at:insert_at] = cmds
+
 
 def rescale_runner(runner: CommandRunner, target_time: float) -> CommandRunner:
     """Uniformly scale all commands so the runner's total duration = target_time."""

@@ -15,13 +15,19 @@ identically to the parent), drawing-time presets, console.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from math import radians
 
 import pygame
 
+from .correction import plan_correction
 from .kinematics import Pose, step, transform_point
 from .limits import Limits, NO_LIMITS
+from .odometry import update_from_encoders
 from .script import (
+    DEFAULT_ANGULAR_SPEED_DEG,
+    DEFAULT_SPEED,
     CommandRunner,
     ScriptError,
     WheelCommand,
@@ -59,6 +65,21 @@ COLOR_HEADING = (100, 160, 100)
 COLOR_ERROR = (220, 110, 110)
 COLOR_OK = (140, 200, 140)
 COLOR_WHEEL_AXIS = (180, 100, 200)
+
+# Encoder trace — pen path reconstructed from /sensors wheel-distance
+# deltas. Ground truth of where the robot actually drew (modulo encoder
+# noise / slip during the tick). Diverges from COLOR_TRACE under wheel
+# slip, motor lag, or a wrong wheelbase.
+COLOR_ENCODER_TRACE = (220, 120, 220)
+
+# Drop encoder corrections if /sensors goes silent for this long while the
+# local runner is active — pose is stale, blind correction does more harm
+# than good.
+SENSOR_TIMEOUT_S = 1.0
+
+# Suppress correction when the just-completed command's duration is below
+# this. Keeps corrections at real corners, not every sub-second segment.
+MIN_CORRECTION_DURATION_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -105,13 +126,38 @@ class SimState:
     last_console_msg_is_error: bool = False
     show_robot: bool = True
     remote_initiated: bool = False
+    # Encoder-derived pose, integrated from /sensors per-wheel distance
+    # deltas. Tracks where the robot actually is, not where the script
+    # thinks it is.
+    encoder_pose: Pose = field(default_factory=lambda: Pose(0.0, 0.0, 0.0))
+    encoder_trace_segments: list[list[tuple[float, float]]] = field(
+        default_factory=lambda: [[]])
+    # Latched per-wheel cumulative distances (cm) from the previous
+    # /sensors sample. None until the first sample, which sets the baseline
+    # only (not integrated).
+    last_encoder_distances_cm: tuple[float, float] | None = None
+    last_sensor_sample_t: float | None = None
+    # Latched once /sensors has been silent for SENSOR_TIMEOUT_S while
+    # running — corrections disabled for the rest of the run.
+    corrections_disabled_stale: bool = False
+    # Runner-index seen last tick; a change means a WheelCommand boundary
+    # was crossed (the trigger to measure drift and maybe correct).
+    prev_runner_idx: int = 0
+    # Boundaries to skip before the next correction, so an injected
+    # corrective sequence fully executes before we re-measure.
+    correction_cooldown_boundaries: int = 0
 
     def current_segment(self) -> list[tuple[float, float]]:
         return self.trace_segments[-1]
 
+    def current_encoder_segment(self) -> list[tuple[float, float]]:
+        return self.encoder_trace_segments[-1]
+
     def break_trace(self) -> None:
         if self.current_segment():
             self.trace_segments.append([])
+        if self.current_encoder_segment():
+            self.encoder_trace_segments.append([])
 
 
 def world_to_screen(x: float, y: float) -> tuple[int, int]:
@@ -207,7 +253,11 @@ def run(ros_enabled: bool = False,
         ros_topic: str = "/cmd_vel",
         limits: Limits | None = None,
         mode_topic: str = "/robot/mode_cmd",
-        slots_path: str | None = None) -> None:
+        slots_path: str | None = None,
+        sensors_topic: str = "/sensors",
+        correction_enabled: bool = True,
+        correction_threshold_cm: float = 1.0,
+        correction_threshold_rad: float = radians(5.0)) -> None:
     if limits is None:
         limits = NO_LIMITS
 
@@ -219,11 +269,13 @@ def run(ros_enabled: bool = False,
 
     publisher = None
     mode_publisher = None
+    sensor_listener = None
     if ros_enabled:
-        from .ros_publisher import RosPublisher
+        from .ros_publisher import RosPublisher, SensorListener
         from .mode_publisher import ModePublisher, MODE_STOP, TIME_PRESETS
         publisher = RosPublisher(topic=ros_topic)
         mode_publisher = ModePublisher(topic=mode_topic)
+        sensor_listener = SensorListener(topic=sensors_topic)
     else:
         from .mode_publisher import MODE_STOP, TIME_PRESETS  # for handler use
 
@@ -269,6 +321,13 @@ def run(ros_enabled: bool = False,
     def reset_pose_and_trace():
         state.pose = Pose(0.0, 0.0, 0.0)
         state.trace_segments = [[]]
+        state.encoder_pose = Pose(0.0, 0.0, 0.0)
+        state.encoder_trace_segments = [[]]
+        state.last_encoder_distances_cm = None
+        state.last_sensor_sample_t = None
+        state.corrections_disabled_stale = False
+        state.prev_runner_idx = 0
+        state.correction_cooldown_boundaries = 0
 
     def rebuild_runner():
         pending_warnings.clear()
@@ -526,6 +585,8 @@ def run(ros_enabled: bool = False,
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                if sensor_listener is not None:
+                    sensor_listener.close()
                 if mode_publisher is not None:
                     mode_publisher.close()
                 if publisher is not None:
@@ -558,6 +619,50 @@ def run(ros_enabled: bool = False,
             reset_pose_and_trace()
             prev_total_time = new_total_time
 
+        # Encoder pose: integrate per-wheel cumulative distance deltas from
+        # /sensors. The first sample latches the baseline only (no
+        # integration) so a non-zero startup reading doesn't slam the pose;
+        # later samples integrate Δd_L, Δd_R.
+        if sensor_listener is not None:
+            sensor_listener.drain()
+            sample = sensor_listener.pop_latest()
+            if sample is not None:
+                _vL_mps, _vR_mps, dL_m, dR_m = sample
+                dL_cm = dL_m * 100.0
+                dR_cm = dR_m * 100.0
+                state.last_sensor_sample_t = time.monotonic()
+                if state.last_encoder_distances_cm is None:
+                    state.last_encoder_distances_cm = (dL_cm, dR_cm)
+                else:
+                    prev_L, prev_R = state.last_encoder_distances_cm
+                    state.encoder_pose = update_from_encoders(
+                        state.encoder_pose, dL_cm - prev_L, dR_cm - prev_R,
+                        state.geometry.width)
+                    state.last_encoder_distances_cm = (dL_cm, dR_cm)
+                    state.current_encoder_segment().append(
+                        transform_point(state.encoder_pose, *pen_body()))
+
+        # Stale watchdog: if /sensors goes silent while running, disable
+        # corrections for the rest of the run (encoder pose just freezes).
+        if (sensor_listener is not None
+                and state.running
+                and state.last_sensor_sample_t is not None
+                and not state.corrections_disabled_stale
+                and (time.monotonic() - state.last_sensor_sample_t)
+                    > SENSOR_TIMEOUT_S):
+            state.corrections_disabled_stale = True
+            state.last_console_msg = (
+                f"WARN: /sensors stale > {SENSOR_TIMEOUT_S:.1f}s — "
+                "corrections disabled")
+            state.last_console_msg_is_error = True
+
+        # Duration of the command about to finish (for the sub-second skip).
+        idx_before = state.runner._idx
+        last_completed_cmd_duration = (
+            state.runner._commands[idx_before].duration
+            if not state.runner.done else 0.0
+        )
+
         if state.running and not state.runner.done:
             for v_left, v_right, sub_dt in state.runner.consume(dt):
                 state.pose = step(state.pose, v_left, v_right,
@@ -575,6 +680,46 @@ def run(ros_enabled: bool = False,
         if not state.running:
             last_v, last_omega = 0.0, 0.0
 
+        # Boundary detection + correction injection. When the runner's
+        # command index advanced this tick, a WheelCommand finished — the
+        # moment to compare encoder pose (ground truth) against the
+        # intended pose (state.pose) and inject a corrective sequence if
+        # drift exceeds threshold.
+        idx_after = state.runner._idx
+        if idx_after != state.prev_runner_idx:
+            if state.correction_cooldown_boundaries > 0:
+                state.correction_cooldown_boundaries -= 1
+            elif (correction_enabled
+                  and sensor_listener is not None
+                  and not state.corrections_disabled_stale
+                  and state.last_encoder_distances_cm is not None
+                  and not state.runner.done
+                  and not state.remote_initiated
+                  and last_completed_cmd_duration >= MIN_CORRECTION_DURATION_S):
+                corr = plan_correction(
+                    state.encoder_pose, state.pose,
+                    linear_speed_cm_s=DEFAULT_SPEED,
+                    angular_speed_rad_s=radians(DEFAULT_ANGULAR_SPEED_DEG),
+                    wheelbase_cm=state.geometry.width,
+                    limits=limits,
+                    pos_threshold_cm=correction_threshold_cm,
+                    heading_threshold_rad=correction_threshold_rad,
+                )
+                if corr:
+                    # Teleport intended pose to encoder pose: the correction
+                    # commands drive *from encoder pose to intended pose*, so
+                    # when consume() yields them, integrating from the encoder
+                    # pose returns state.pose to where it just was. Without the
+                    # teleport we'd double-apply the correction delta. Break
+                    # the trace so the teleport doesn't draw a phantom line.
+                    state.break_trace()
+                    state.pose = Pose(state.encoder_pose.x,
+                                      state.encoder_pose.y,
+                                      state.encoder_pose.theta)
+                    state.runner.inject(corr)
+                    state.correction_cooldown_boundaries = 1 + len(corr)
+            state.prev_runner_idx = idx_after
+
         # Publish /cmd_vel only when locally driving AND not initiated via a
         # slot click (the Pi service owns /cmd_vel in that case; the sim is
         # just mirroring locally so the user sees what the Pi will draw).
@@ -586,6 +731,9 @@ def run(ros_enabled: bool = False,
 
         screen.fill((20, 22, 26))
         draw_canvas_background(screen)
+        if sensor_listener is not None:
+            draw_trace(screen, state.encoder_trace_segments,
+                       color=COLOR_ENCODER_TRACE, width=2)
         draw_trace(screen, state.trace_segments)
         if state.show_robot:
             draw_robot(screen, state.geometry, state.pose, pen_world)
@@ -612,7 +760,9 @@ def run(ros_enabled: bool = False,
         if publisher is not None:
             drive = "remote+local" if state.remote_initiated else (
                 "local" if state.running else "idle")
+            rx = sensor_listener.received_count if sensor_listener else 0
             ros_msg = (f"ROS {drive}: {ros_topic}  pubs={publisher.published_count}  "
+                       f"/sensors rx={rx}  "
                        f"lim v≤{limits.max_linear_cm_s * 0.01:.2f} m/s, "
                        f"ω≤{limits.max_angular_rad_s:.2f} rad/s")
         elif limits is not NO_LIMITS:
@@ -622,6 +772,22 @@ def run(ros_enabled: bool = False,
             ros_msg = "ROS: off · no velocity limits"
         ros_color = COLOR_OK if publisher is not None else ui.COLOR_TEXT_DIM
         ui.draw_text(screen, font, ros_msg, (PANEL_X + PADDING, status_y + 36), ros_color)
+        if sensor_listener is not None:
+            if state.corrections_disabled_stale:
+                corr_txt = "correction: DISABLED (/sensors stale)"
+                corr_color = COLOR_ERROR
+            elif not correction_enabled:
+                corr_txt = "correction: off (--no-correction) · encoder ghost only"
+                corr_color = ui.COLOR_TEXT_DIM
+            else:
+                ex = state.encoder_pose.x - state.pose.x
+                ey = state.encoder_pose.y - state.pose.y
+                drift = (ex * ex + ey * ey) ** 0.5
+                corr_txt = (f"correction: on · drift {drift:4.1f} cm "
+                            f"(thr {correction_threshold_cm:.1f} cm)")
+                corr_color = ui.COLOR_TEXT_DIM
+            ui.draw_text(screen, font, corr_txt,
+                         (PANEL_X + PADDING, status_y + 54), corr_color)
 
         ui.draw_divider(screen, PANEL_X + PADDING, 365, INNER_W)
         ui.draw_text(screen, font, "Script:", (PANEL_X + PADDING, 373))

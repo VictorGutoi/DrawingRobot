@@ -11,6 +11,7 @@ remote) drives the fail-safe service identically.
 """
 
 import argparse
+from math import radians
 
 from .limits import Limits
 
@@ -59,6 +60,25 @@ def main() -> None:
                         metavar="S",
                         help="Uniformly rescale the script to take this many "
                              "seconds (default: no rescale). Headless mode only.")
+    parser.add_argument("--sensors-topic", default="/sensors",
+                        help="ROS2 topic for encoder feedback (default: "
+                             "/sensors). Subscribed when --ros is on; drives "
+                             "the encoder ghost trace and closed-loop "
+                             "correction. Sim mode only.")
+    parser.add_argument("--correction-threshold-cm", type=float, default=1.0,
+                        metavar="CM",
+                        help="Position drift threshold (cm) below which no "
+                             "correction is injected at a command boundary "
+                             "(default: 1.0).")
+    parser.add_argument("--correction-threshold-deg", type=float, default=5.0,
+                        metavar="DEG",
+                        help="Heading drift threshold (degrees) below which "
+                             "no correction is injected (default: 5.0).")
+    parser.add_argument("--no-correction", action="store_true",
+                        help="Show the encoder ghost trace but do not inject "
+                             "corrective commands. Use this if a clean drawing "
+                             "matters more than positional accuracy (the rigid "
+                             "pen draws during a correction maneuver).")
     args = parser.parse_args()
 
     if args.headless and args.pi_service:
@@ -94,7 +114,11 @@ def main() -> None:
     else:
         from .sim import run
         run(ros_enabled=args.ros, ros_topic=args.ros_topic, limits=limits,
-            mode_topic=args.mode_topic, slots_path=slots_path)
+            mode_topic=args.mode_topic, slots_path=slots_path,
+            sensors_topic=args.sensors_topic,
+            correction_enabled=not args.no_correction,
+            correction_threshold_cm=args.correction_threshold_cm,
+            correction_threshold_rad=radians(args.correction_threshold_deg))
 
 
 if __name__ == "__main__":
