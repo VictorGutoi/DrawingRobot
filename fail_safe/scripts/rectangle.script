@@ -1,9 +1,9 @@
 # 30 cm x 15 cm rectangle.
-forward 30
-turn 93
+forward 34
+turn 94
 forward 13
-turn 93
-forward 33
-turn 93
+turn 90
+forward 34
+turn 90
 forward 15
 turn 93

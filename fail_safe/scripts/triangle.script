@@ -1,7 +1,7 @@
 # Equilateral triangle, side 20 cm. Interior angles 60°, exterior turn = 120°.
-forward 25
+forward 29
 turn 125
-forward 25
+forward 29
 turn 125
-forward 25
+forward 32
 turn 125
